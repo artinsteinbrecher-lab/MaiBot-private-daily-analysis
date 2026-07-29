@@ -1,10 +1,10 @@
 {
   "manifest_version": 2,
   "id": "khiqwq.daily_analysis",
-  "version": "2.4.0",
+  "version": "3.0.0",
   "plugin_type": "tool",
-  "name": "每日分析插件",
-  "description": "智能分析 QQ 群聊天记录并生成精美图片总结。支持群聊整体总结、个人总结、智能群友称号、群聊金句、炫压抑评级、24小时活跃轨迹与每日定时自动总结。已适配 MaiBot 1.0 / maibot_sdk 2.x，使用宿主内置 HTML 渲染能力，无需自行安装浏览器依赖。",
+  "name": "私聊群事件日报",
+  "description": "按白名单读取 QQ 群聊天记录，生成带时间戳和回查锚点的事实型事件日报，并仅发送给指定管理员私聊。支持手动总结单群或全部群，以及次日定时生成前一完整自然日的日报；来源群全程静默。",
   "author": {
     "name": "风花叶",
     "url": "https://github.com/khiqwq"
@@ -13,7 +13,7 @@
   "urls": {
     "repository": "https://github.com/khiqwq/Maibot_daily_analysis",
     "homepage": "https://github.com/khiqwq/Maibot_daily_analysis",
-    "documentation": "https://docs.mai-mai.org/develop/plugin_develop/",
+    "documentation": "https://docs.mai-mai.org/plugin/",
     "issues": "https://github.com/khiqwq/Maibot_daily_analysis/issues"
   },
   "host_application": {
@@ -39,6 +39,7 @@
     "config.get",
     "message.get_by_time_in_chat",
     "chat.get_group_streams",
+    "chat.open_session",
     "render.html2png",
     "maisaka.context.append"
   ],

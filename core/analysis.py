@@ -18,8 +18,10 @@ import asyncio
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 from collections import Counter
+from zoneinfo import ZoneInfo
 
 from .constants import AnalysisConfig
+from .event_digest import merge_event_reports_fallback, normalize_event_report
 
 
 # LLM 各任务的输出 token 上限。
@@ -29,9 +31,12 @@ _SUMMARY_MAX_TOKENS = 1200
 _JSON_MAX_TOKENS = 2500
 # 多用户 JSON（群友称号/炫压抑评级）输出较长，但要兼顾 30 秒 RPC 超时，控制在 2500
 _MULTI_USER_JSON_MAX_TOKENS = 2500
+_EVENT_JSON_MAX_TOKENS = 3200
 
 # LLM 输入消息上限：取最近 N 条参与总结/话题/金句，避免超大群 prompt 过长拖慢生成
 _MAX_INPUT_MESSAGES = 400
+_EVENT_CHUNK_MESSAGES = 160
+_EVENT_CHUNK_CHARACTERS = 14000
 
 # 并发 LLM 调用上限。设为 2：兼顾速度与"上游串行时排队不耗尽超时预算"。
 _LLM_MAX_CONCURRENCY = 2
@@ -71,6 +76,7 @@ class AnalysisService:
         ctx: Any,
         model: str = _DEFAULT_MODEL_TASK,
         call_timeout_s: int = _DEFAULT_CALL_TIMEOUT_S,
+        timezone_name: str = "Asia/Shanghai",
     ):
         self.ctx = ctx
         self.logger = ctx.logger
@@ -78,6 +84,7 @@ class AnalysisService:
         self.model = model or _DEFAULT_MODEL_TASK
         # 单次 LLM 调用的客户端等待上限（秒），可由插件配置覆盖
         self.call_timeout_s = max(5, int(call_timeout_s or _DEFAULT_CALL_TIMEOUT_S))
+        self.timezone_name = timezone_name or "Asia/Shanghai"
         # 限制并发 LLM 调用数：每个能力调用有约 30 秒 RPC 硬超时，若上游串行处理，
         # 一次放出过多调用会让排队靠后的调用把等待时间算进自己的超时预算而被掐断。
         # 信号量在"真正发起 ctx.llm.generate 之前"获取，确保每次调用的 30 秒计时
@@ -228,6 +235,428 @@ class AnalysisService:
             "hours": hours,
             "hourly_distribution": hourly_distribution,
         }
+
+    # ==================== 群聊事件日报（LLM） ====================
+
+    def _select_time_balanced_messages(
+        self, messages: List[dict], limit: int
+    ) -> List[dict]:
+        """按配置时区的小时分桶均衡抽样，避免高峰聊天淹没其他时段。"""
+
+        if limit <= 0 or len(messages) <= limit:
+            return list(messages)
+        if limit == 1:
+            return [messages[-1]]
+
+        buckets: Dict[int, List[dict]] = {}
+        for message in messages:
+            timestamp = float(message.get("time") or 0)
+            hour = self._event_datetime(timestamp).hour if timestamp > 0 else -1
+            buckets.setdefault(hour, []).append(message)
+
+        bucket_items = sorted(buckets.items(), key=lambda item: item[0])
+        if len(bucket_items) > limit:
+            last_index = len(bucket_items) - 1
+            chosen_indexes = {
+                round(position * last_index / (limit - 1))
+                for position in range(limit)
+            }
+            bucket_items = [
+                item for index, item in enumerate(bucket_items) if index in chosen_indexes
+            ]
+
+        bucket_count = len(bucket_items)
+        quotas = [limit // bucket_count] * bucket_count
+        for index in range(limit % bucket_count):
+            quotas[index] += 1
+        quotas = [
+            min(quota, len(bucket))
+            for quota, (_, bucket) in zip(quotas, bucket_items)
+        ]
+
+        remaining = limit - sum(quotas)
+        while remaining > 0:
+            progressed = False
+            for index, (_, bucket) in enumerate(bucket_items):
+                if quotas[index] >= len(bucket):
+                    continue
+                quotas[index] += 1
+                remaining -= 1
+                progressed = True
+                if remaining == 0:
+                    break
+            if not progressed:
+                break
+
+        selected: List[dict] = []
+        for quota, (_, bucket) in zip(quotas, bucket_items):
+            if quota <= 0:
+                continue
+            if quota >= len(bucket):
+                selected.extend(bucket)
+                continue
+            if quota == 1:
+                selected.append(bucket[len(bucket) // 2])
+                continue
+            last_index = len(bucket) - 1
+            selected.extend(
+                bucket[round(position * last_index / (quota - 1))]
+                for position in range(quota)
+            )
+        selected.sort(key=lambda message: float(message.get("time") or 0))
+        return selected
+
+    @staticmethod
+    def _chunk_event_messages(messages: List[dict]) -> List[List[dict]]:
+        """按消息数和字符数切分，控制单次 LLM 请求体积。"""
+
+        chunks: List[List[dict]] = []
+        current: List[dict] = []
+        current_chars = 0
+        for message in messages:
+            text = str(message.get("processed_plain_text") or "")
+            estimated = len(text) + 60
+            if current and (
+                len(current) >= _EVENT_CHUNK_MESSAGES
+                or current_chars + estimated > _EVENT_CHUNK_CHARACTERS
+            ):
+                chunks.append(current)
+                current = []
+                current_chars = 0
+            current.append(message)
+            current_chars += estimated
+        if current:
+            chunks.append(current)
+        return chunks
+
+    def _event_datetime(self, timestamp: float) -> datetime:
+        """按插件配置时区格式化事件时间，避免 Ubuntu 容器的系统时区影响日报。"""
+
+        try:
+            return datetime.fromtimestamp(timestamp, ZoneInfo(self.timezone_name))
+        except Exception:
+            return datetime.fromtimestamp(timestamp)
+
+    @staticmethod
+    def _event_speaker(message: dict) -> str:
+        return str(
+            message.get("user_cardname")
+            or message.get("user_nickname")
+            or "未知用户"
+        ).strip()
+
+    def _format_event_messages(self, messages: List[dict]) -> str:
+        """为事件抽取提供带精确时间和发言人的记录。"""
+
+        lines: List[str] = []
+        for message in messages:
+            text = re.sub(
+                r"\s+",
+                " ",
+                str(message.get("processed_plain_text") or ""),
+            ).strip()
+            if len(text) <= 1 or text.startswith("/"):
+                continue
+            timestamp = float(message.get("time") or 0)
+            if timestamp <= 0:
+                continue
+            time_text = self._event_datetime(timestamp).strftime("%H:%M:%S")
+            display_name = self._event_speaker(message)
+            lines.append(f"[{time_text}] {display_name}: {text[:800]}")
+        return "\n".join(lines)
+
+    def _ground_event_report(
+        self,
+        value: Any,
+        messages: List[dict],
+        *,
+        max_events: int,
+        max_anchors: int,
+        include_links: bool,
+    ) -> Dict[str, Any]:
+        """把模型给出的时间、原话、参与者和链接约束到真实输入消息。"""
+
+        if not isinstance(value, dict):
+            value = {}
+
+        records: List[Dict[str, str]] = []
+        valid_minutes = set()
+        valid_speakers = set()
+        source_text = []
+        for message in messages:
+            text = re.sub(
+                r"\s+",
+                " ",
+                str(message.get("processed_plain_text") or ""),
+            ).strip()
+            timestamp = float(message.get("time") or 0)
+            if not text or timestamp <= 0:
+                continue
+            minute = self._event_datetime(timestamp).strftime("%H:%M")
+            speaker = self._event_speaker(message)
+            records.append({"time": minute, "speaker": speaker, "text": text})
+            valid_minutes.add(minute)
+            valid_speakers.add(speaker)
+            source_text.append(text)
+
+        grounded_events: List[Dict[str, Any]] = []
+        for raw_event in value.get("events") or []:
+            if not isinstance(raw_event, dict):
+                continue
+            event = dict(raw_event)
+
+            anchors = []
+            if max_anchors > 0:
+                for raw_anchor in event.get("anchors") or []:
+                    if not isinstance(raw_anchor, dict):
+                        continue
+                    anchor_time = str(raw_anchor.get("time") or "").strip()
+                    anchor_speaker = str(raw_anchor.get("speaker") or "").strip()
+                    anchor_quote = re.sub(
+                        r"\s+",
+                        " ",
+                        str(raw_anchor.get("quote") or ""),
+                    ).strip()
+                    if not anchor_time or not anchor_speaker or not anchor_quote:
+                        continue
+                    matched = any(
+                        record["time"] == anchor_time
+                        and record["speaker"] == anchor_speaker
+                        and anchor_quote in record["text"]
+                        for record in records
+                    )
+                    if matched:
+                        anchors.append(
+                            {
+                                "time": anchor_time,
+                                "speaker": anchor_speaker,
+                                "quote": anchor_quote,
+                            }
+                        )
+                    if len(anchors) >= max_anchors:
+                        break
+            event["anchors"] = anchors
+
+            start_time = str(event.get("start_time") or "").strip()
+            end_time = str(event.get("end_time") or "").strip()
+            if start_time not in valid_minutes:
+                start_time = anchors[0]["time"] if anchors else ""
+            if end_time not in valid_minutes:
+                end_time = anchors[-1]["time"] if anchors else ""
+            event["start_time"] = start_time
+            event["end_time"] = end_time
+
+            raw_participants = event.get("participants")
+            if not isinstance(raw_participants, list):
+                raw_participants = []
+            event["participants"] = [
+                speaker
+                for speaker in raw_participants
+                if str(speaker).strip() in valid_speakers
+            ]
+            if include_links:
+                raw_links = event.get("links")
+                if not isinstance(raw_links, list):
+                    raw_links = []
+                event["links"] = [
+                    link
+                    for link in raw_links
+                    if str(link).strip()
+                    and any(str(link).strip() in text for text in source_text)
+                ]
+            else:
+                event["links"] = []
+            grounded_events.append(event)
+
+        return normalize_event_report(
+            {"overview": value.get("overview"), "events": grounded_events},
+            max_events=max_events,
+            max_anchors=max_anchors,
+            include_links=include_links,
+        )
+
+    async def _extract_event_chunk(
+        self,
+        messages: List[dict],
+        *,
+        max_events: int,
+        max_anchors: int,
+        include_links: bool,
+        chunk_index: int,
+        chunk_count: int,
+    ) -> Dict[str, Any]:
+        chat_text = self._format_event_messages(messages)
+        if not chat_text:
+            return {"overview": "", "events": []}
+
+        prompt = f"""你是一名严谨的群聊事件记录员。请从下面的 QQ 群聊记录中提取真正发生的事情，
+不要做成员活跃度、性格、MBTI、金句或娱乐排名，也不要把寒暄、复读、表情刷屏当作事件。
+
+这是全天记录的第 {chunk_index}/{chunk_count} 段。每条记录前的时间是唯一可信时间来源。
+
+群聊记录：
+{chat_text}
+
+输出要求：
+1. 按时间顺序提取本段最多 {max_events} 个有实际内容的事件。
+2. 事件应包括：事情经过、明确结论、待确认事项、必要参与者、重要链接。
+3. start_time/end_time 和 anchors.time 必须原样取自记录中的 HH:MM，不得猜测。
+4. anchors 最多 {max_anchors} 条，只摘录便于回查的关键原话；quote 不超过 80 字。
+5. 没有重要事件时返回空 events。
+6. 只陈述记录能支持的事实；无法确认的内容写入 pending，不要自行补全。
+7. 链接必须逐字复制原文；{"保留重要链接" if include_links else "links 始终返回空数组"}。
+
+只返回 JSON 对象，不要 Markdown：
+{{
+  "overview": "本段概览，80字以内",
+  "events": [
+    {{
+      "start_time": "09:20",
+      "end_time": "10:05",
+      "title": "事件标题",
+      "summary": "事情经过和背景",
+      "outcomes": ["已经确定的结论"],
+      "pending": ["尚未解决或待确认事项"],
+      "participants": ["与事件直接相关的人"],
+      "anchors": [
+        {{"time": "09:24", "speaker": "昵称", "quote": "关键原话"}}
+      ],
+      "links": ["https://example.com"]
+    }}
+  ]
+}}"""
+        result = await self._llm(
+            prompt,
+            request_type="plugin.daily_event.extract",
+            max_tokens=_EVENT_JSON_MAX_TOKENS,
+            temperature=0.2,
+        )
+        parsed = self._parse_llm_json_object(result or "") or {}
+        return self._ground_event_report(
+            parsed,
+            messages,
+            max_events=max_events,
+            max_anchors=max_anchors,
+            include_links=include_links,
+        )
+
+    async def _merge_event_candidates(
+        self,
+        reports: List[Dict[str, Any]],
+        *,
+        max_events: int,
+        max_anchors: int,
+        include_links: bool,
+    ) -> Dict[str, Any]:
+        if len(reports) == 1:
+            return normalize_event_report(
+                reports[0],
+                max_events=max_events,
+                max_anchors=max_anchors,
+                include_links=include_links,
+            )
+
+        candidates = []
+        for report in reports:
+            candidates.extend(report.get("events") or [])
+        if not candidates:
+            return {"overview": "", "events": []}
+
+        prompt = f"""下面是同一个 QQ 群一天内分段提取的事件候选。请合并跨分段延续或重复的事件，
+保留全天真正重要的事件，按时间排序。不得创造新事实、时间、原话或链接。
+
+候选事件：
+{json.dumps(candidates, ensure_ascii=False)}
+
+要求：
+1. 最多保留 {max_events} 个事件。
+2. 每个事件最多保留 {max_anchors} 条回查锚点。
+3. 时间范围覆盖合并后事件最早到最晚的原始时间。
+4. overview 用 150—300 字概括这一天发生了什么，不写娱乐统计。
+5. 输出字段结构与候选事件一致。
+
+只返回 JSON 对象：
+{{"overview": "全天概览", "events": [...]}}"""
+        result = await self._llm(
+            prompt,
+            request_type="plugin.daily_event.merge",
+            max_tokens=_EVENT_JSON_MAX_TOKENS,
+            temperature=0.2,
+        )
+        parsed = self._parse_llm_json_object(result or "")
+        if parsed:
+            normalized = normalize_event_report(
+                parsed,
+                max_events=max_events,
+                max_anchors=max_anchors,
+                include_links=include_links,
+            )
+            if normalized["events"]:
+                return normalized
+        return merge_event_reports_fallback(
+            reports,
+            max_events=max_events,
+            max_anchors=max_anchors,
+            include_links=include_links,
+        )
+
+    async def analyze_group_event_report(
+        self,
+        messages: List[dict],
+        *,
+        max_events: int = 8,
+        max_anchors: int = 2,
+        max_input_messages: int = 1200,
+        include_links: bool = True,
+    ) -> Dict[str, Any]:
+        """按全天时间线生成结构化群聊事件日报。"""
+
+        usable = [
+            message
+            for message in messages
+            if str(message.get("processed_plain_text") or "").strip()
+            and not message.get("is_command")
+            and not message.get("is_notify")
+        ]
+        sampled = len(usable) > max_input_messages > 0
+        selected = self._select_time_balanced_messages(usable, max_input_messages)
+        chunks = self._chunk_event_messages(selected)
+        if not chunks:
+            return {
+                "overview": "",
+                "events": [],
+                "sampled": sampled,
+                "analyzed_message_count": 0,
+            }
+
+        reports: List[Dict[str, Any]] = []
+        for index, chunk in enumerate(chunks, start=1):
+            report = await self._extract_event_chunk(
+                chunk,
+                max_events=max_events,
+                max_anchors=max_anchors,
+                include_links=include_links,
+                chunk_index=index,
+                chunk_count=len(chunks),
+            )
+            reports.append(report)
+
+        merged = await self._merge_event_candidates(
+            reports,
+            max_events=max_events,
+            max_anchors=max_anchors,
+            include_links=include_links,
+        )
+        merged = self._ground_event_report(
+            merged,
+            selected,
+            max_events=max_events,
+            max_anchors=max_anchors,
+            include_links=include_links,
+        )
+        merged["sampled"] = sampled
+        merged["analyzed_message_count"] = len(selected)
+        return merged
 
     # ==================== 群聊整体分析（LLM） ====================
 

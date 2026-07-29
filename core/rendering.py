@@ -347,6 +347,59 @@ class SummaryRenderer:
                 return nested
         return None
 
+    # ==================== 群聊事件日报图片 ====================
+
+    async def generate_event_report_images(
+        self,
+        *,
+        group_name: str,
+        group_id: str,
+        report_date: datetime,
+        period_text: str,
+        message_count: int,
+        report: Dict[str, Any],
+        events_per_page: int = 4,
+    ) -> List[str]:
+        """把结构化事件日报渲染成一组适合 QQ 阅读的分页 PNG。"""
+
+        events = list(report.get("events") or [])
+        if not events:
+            return []
+
+        page_size = max(1, min(8, int(events_per_page or 4)))
+        event_pages = [
+            events[index : index + page_size]
+            for index in range(0, len(events), page_size)
+        ]
+        images: List[str] = []
+        for page_index, page_events in enumerate(event_pages, start=1):
+            html_content = self._render_template(
+                "event_report_template.html",
+                group_name=group_name,
+                group_id=group_id,
+                report_date=report_date.strftime("%Y年%m月%d日"),
+                period_text=period_text,
+                message_count=message_count,
+                analyzed_message_count=int(
+                    report.get("analyzed_message_count") or message_count
+                ),
+                sampled=bool(report.get("sampled")),
+                overview=str(report.get("overview") or "") if page_index == 1 else "",
+                events=page_events,
+                event_offset=(page_index - 1) * page_size,
+                page_index=page_index,
+                page_count=len(event_pages),
+            )
+            if not html_content:
+                self.logger.error(
+                    f"群 {group_id} 事件日报第 {page_index} 页模板渲染为空"
+                )
+                continue
+            image_base64 = await self._render_png_base64(html_content)
+            if image_base64:
+                images.append(image_base64)
+        return images
+
     # ==================== 群聊总结图片 ====================
 
     async def generate_summary_image(
