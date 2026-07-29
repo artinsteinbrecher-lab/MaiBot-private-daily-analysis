@@ -2,7 +2,8 @@
 
 ``/summary`` 仅接受管理员 QQ 私聊，用于总结一个来源群或全部白名单群；
 定时任务在次日生成前一个完整自然日的报告。进度和结果只发送到目标私聊，
-来源群始终静默。原版 ``/mysummary`` 个人总结功能继续保留。
+事件日报不会向来源群发送内容。还可通过“绝对静默”名单阻止指定来源群的
+所有出站消息；原版 ``/mysummary`` 个人总结功能继续保留。
 
 所有宿主能力通过官方 ``ctx.*`` API 调用，图片由 ``render.html2png`` 渲染。
 """
@@ -11,7 +12,8 @@ import asyncio
 from datetime import date, datetime, timedelta
 from typing import Any, Dict, List, Literal, Optional, Tuple
 
-from maibot_sdk import Command, Field, MaiBotPlugin, PluginConfigBase
+from maibot_sdk import Command, Field, HookHandler, MaiBotPlugin, PluginConfigBase
+from maibot_sdk.types import ErrorPolicy, HookMode, HookOrder
 
 from .core import AnalysisService, SummaryRenderer
 from .core.event_digest import (
@@ -70,7 +72,7 @@ class PluginSection(PluginConfigBase):
         json_schema_extra={"label": "启用插件"},
     )
     config_version: str = Field(
-        default="3.0.0",
+        default="3.1.0",
         description="配置文件版本，用于兼容性校验，请勿手动修改",
         json_schema_extra={"label": "配置版本", "disabled": True},
     )
@@ -193,10 +195,30 @@ class AutoSummarySection(PluginConfigBase):
     )
 
 
+class SilenceSection(PluginConfigBase):
+    __ui_label__ = "绝对静默"
+    __ui_icon__ = "volume-x"
+    __ui_order__ = 4
+    enabled: bool = Field(
+        default=False,
+        description="开启后，在真正发送到 QQ 前拦截静默名单群的所有出站消息；"
+        "消息接收、入库和日报生成不受影响",
+        json_schema_extra={"label": "启用绝对静默"},
+    )
+    target_chats: List[str] = Field(
+        default_factory=list,
+        description="需要绝对静默的 QQ 群号；只有同时存在于“允许总结的群聊”中的群号才生效",
+        json_schema_extra={
+            "label": "绝对静默群聊",
+            "hint": "阻止普通回复、@回复、昵称触发、命令和其他插件向这些群发送消息",
+        },
+    )
+
+
 class CommandPermissionSection(PluginConfigBase):
     __ui_label__ = "管理员账号"
     __ui_icon__ = "shield"
-    __ui_order__ = 4
+    __ui_order__ = 5
     admin_users: List[str] = Field(
         default_factory=list,
         description="允许私聊执行 /summary 的管理员 QQ；不同账号的请求和结果彼此独立",
@@ -207,7 +229,7 @@ class CommandPermissionSection(PluginConfigBase):
 class AdvancedSection(PluginConfigBase):
     __ui_label__ = "高级"
     __ui_icon__ = "settings"
-    __ui_order__ = 5
+    __ui_order__ = 6
     model_task: str = Field(
         default="utils",
         description="生成总结/分析使用的【模型任务名】。该任务内配置的模型会按其 model_list 随机/轮询使用。"
@@ -250,6 +272,7 @@ class DailyAnalysisConfig(PluginConfigBase):
     summary: SummarySection = Field(default_factory=SummarySection)
     user_summary: UserSummarySection = Field(default_factory=UserSummarySection)
     auto_summary: AutoSummarySection = Field(default_factory=AutoSummarySection)
+    silence: SilenceSection = Field(default_factory=SilenceSection)
     command_permission: CommandPermissionSection = Field(default_factory=CommandPermissionSection)
     advanced: AdvancedSection = Field(default_factory=AdvancedSection)
 
@@ -600,6 +623,47 @@ class DailyAnalysisPlugin(MaiBotPlugin):
 
         target_chats = self._as_id_set(self.config.auto_summary.target_chats)
         return bool(target_chats) and str(group_id) in target_chats
+
+    def _is_silent_group(self, group_id: str) -> bool:
+        """只允许日报来源白名单中的群进入绝对静默名单。"""
+
+        if not group_id or not self.config.silence.enabled:
+            return False
+        allowed_groups = self._as_id_set(self.config.auto_summary.target_chats)
+        silent_groups = self._as_id_set(self.config.silence.target_chats)
+        return str(group_id) in allowed_groups.intersection(silent_groups)
+
+    @staticmethod
+    def _outbound_group_id(message: Any) -> str:
+        """从官方 send_service Hook 的序列化 SessionMessage 中读取群号。"""
+
+        if not isinstance(message, dict):
+            return ""
+        message_info = message.get("message_info")
+        if not isinstance(message_info, dict):
+            return ""
+        group_info = message_info.get("group_info")
+        if not isinstance(group_info, dict):
+            return ""
+        return str(group_info.get("group_id") or "").strip()
+
+    @HookHandler(
+        "send_service.before_send",
+        name="silent_group_send_guard",
+        description="阻止绝对静默名单群的所有出站消息，同时保留消息接收和日报读取",
+        mode=HookMode.BLOCKING,
+        order=HookOrder.EARLY,
+        timeout_ms=1000,
+        error_policy=ErrorPolicy.ABORT,
+    )
+    async def guard_silent_group_send(self, **kwargs: Any) -> Dict[str, str]:
+        """在 Platform IO 前做最终拦截，覆盖普通回复、命令和其他插件发送。"""
+
+        group_id = self._outbound_group_id(kwargs.get("message"))
+        if self._is_silent_group(group_id):
+            self.ctx.logger.info(f"已阻止绝对静默群 {group_id} 的出站消息")
+            return {"action": "abort"}
+        return {"action": "continue"}
 
     # ==================== 后台总结任务（命令秒回，重活后台跑） ====================
 
@@ -1070,6 +1134,10 @@ class DailyAnalysisPlugin(MaiBotPlugin):
 
             if not self._check_group_permission(group_id):
                 return False, f"群 {group_id} 无 /mysummary 权限", 0
+
+            if self._is_silent_group(group_id):
+                self.ctx.logger.info(f"已静默拦截群 {group_id} 内的 /mysummary")
+                return True, "绝对静默群内已拦截", 2
 
             if not self.config.user_summary.enabled:
                 return False, "个人总结功能已关闭", 0

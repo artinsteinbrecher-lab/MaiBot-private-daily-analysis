@@ -41,14 +41,34 @@ def _load_plugin_module():
         def __call__(self, function):
             return function
 
+    class HookHandler(Command):
+        pass
+
     def Field(*, default=None, default_factory=None, **kwargs):
         return default_factory() if default_factory is not None else default
 
     sdk.MaiBotPlugin = MaiBotPlugin
     sdk.PluginConfigBase = PluginConfigBase
     sdk.Command = Command
+    sdk.HookHandler = HookHandler
     sdk.Field = Field
     sys.modules["maibot_sdk"] = sdk
+
+    sdk_types = types.ModuleType("maibot_sdk.types")
+
+    class ErrorPolicy:
+        ABORT = "abort"
+
+    class HookMode:
+        BLOCKING = "blocking"
+
+    class HookOrder:
+        EARLY = "early"
+
+    sdk_types.ErrorPolicy = ErrorPolicy
+    sdk_types.HookMode = HookMode
+    sdk_types.HookOrder = HookOrder
+    sys.modules["maibot_sdk.types"] = sdk_types
 
     root = Path(__file__).resolve().parents[1]
     package_name = "daily_analysis_plugin_under_test"
@@ -97,7 +117,15 @@ class _Send:
 
 
 class PluginRoutingTests(unittest.TestCase):
-    def _plugin(self, *, recipient="", admins=None, groups=None):
+    def _plugin(
+        self,
+        *,
+        recipient="",
+        admins=None,
+        groups=None,
+        silence_enabled=False,
+        silent_groups=None,
+    ):
         plugin = object.__new__(DailyAnalysisPlugin)
         plugin.ctx = SimpleNamespace(logger=_Logger(), send=_Send())
         plugin.config = SimpleNamespace(
@@ -106,9 +134,74 @@ class PluginRoutingTests(unittest.TestCase):
                 recipient_user=recipient,
                 target_chats=groups or [],
             ),
+            silence=SimpleNamespace(
+                enabled=silence_enabled,
+                target_chats=silent_groups or [],
+            ),
             command_permission=SimpleNamespace(admin_users=admins or []),
         )
         return plugin
+
+    def test_silent_group_blocks_outbound_message(self):
+        plugin = self._plugin(
+            groups=["20001", "20002"],
+            silence_enabled=True,
+            silent_groups=["20001"],
+        )
+        result = asyncio.run(
+            DailyAnalysisPlugin.guard_silent_group_send(
+                plugin,
+                message={
+                    "message_info": {
+                        "group_info": {"group_id": "20001", "group_name": "静默群"}
+                    }
+                },
+            )
+        )
+        self.assertEqual(result, {"action": "abort"})
+
+    def test_silent_group_allows_private_and_other_groups(self):
+        plugin = self._plugin(
+            groups=["20001", "20002"],
+            silence_enabled=True,
+            silent_groups=["20001"],
+        )
+        private_result = asyncio.run(
+            DailyAnalysisPlugin.guard_silent_group_send(
+                plugin,
+                message={"message_info": {"group_info": None}},
+            )
+        )
+        other_group_result = asyncio.run(
+            DailyAnalysisPlugin.guard_silent_group_send(
+                plugin,
+                message={
+                    "message_info": {
+                        "group_info": {"group_id": "20002", "group_name": "正常群"}
+                    }
+                },
+            )
+        )
+        self.assertEqual(private_result, {"action": "continue"})
+        self.assertEqual(other_group_result, {"action": "continue"})
+
+    def test_silent_group_must_also_be_summary_source(self):
+        plugin = self._plugin(
+            groups=["20002"],
+            silence_enabled=True,
+            silent_groups=["20001"],
+        )
+        result = asyncio.run(
+            DailyAnalysisPlugin.guard_silent_group_send(
+                plugin,
+                message={
+                    "message_info": {
+                        "group_info": {"group_id": "20001", "group_name": "非来源群"}
+                    }
+                },
+            )
+        )
+        self.assertEqual(result, {"action": "continue"})
 
     def test_group_summary_command_never_sends_to_group(self):
         plugin = self._plugin(admins=["10001"], groups=["20001"])

@@ -4,6 +4,9 @@
 改造的 MaiBot 1.0 / `maibot_sdk` 2.x 插件。它从明确配置的 QQ 群白名单读取聊天记录，
 生成“这一天发生了什么”的事实型日报，并且只发到管理员 QQ 私聊；来源群全程静默。
 
+可选开启“绝对静默”出站保护。开启后，指定来源群仍会正常接收和保存消息，
+但普通回复、@ 回复、昵称触发、命令回复和其他插件输出都会在 Platform IO 前被拦截。
+
 插件主要面向 Ubuntu + Docker 部署。运行能力全部通过 MaiBot 官方 `ctx.*` API 调用，
 图片由宿主的 `render.html2png` 生成，不自带浏览器、不写临时图片文件。
 
@@ -40,7 +43,7 @@ Docker 部署时通常将本目录放在宿主机已映射到 MaiBot 插件目�
 ```toml
 [plugin]
 enabled = true
-config_version = "3.0.0"
+config_version = "3.1.0"
 
 [summary]
 max_events = 8
@@ -60,6 +63,12 @@ target_chats = ["123456789", "987654321"]
 # 自动日报唯一接收 QQ；留空时自动任务不生成
 recipient_user = "111111111"
 
+[silence]
+# 可选：在真正发送到 QQ 前拦截指定来源群的所有出站消息
+enabled = false
+# 只有同时位于 auto_summary.target_chats 的群号才生效
+target_chats = ["123456789"]
+
 [command_permission]
 # 可以私聊执行 /summary 的 QQ。自动接收 QQ 也必须在这里。
 admin_users = ["111111111", "222222222"]
@@ -77,6 +86,8 @@ group_timeout_seconds = 300
 
 - `auto_summary.target_chats` 必须明确填写。空列表不是“全部”，而是完全禁用群总结。
 - `auto_summary.recipient_user` 必须同时在 `command_permission.admin_users` 中。
+- `silence.target_chats` 只有在 `silence.enabled = true` 且群号同时位于来源群白名单时生效。
+- 绝对静默仅拦截出站消息，不影响该群消息接收、入库和日报读取。
 - 多个管理员只共享来源群白名单，不共享手动请求结果。
 - QQ 号和群号在配置中按字符串填写，避免数字类型转换。
 - `advanced.model_task` 必须是 MaiBot 中存在的任务名，例如 `utils`；不能填供应商模型名。

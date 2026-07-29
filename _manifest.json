@@ -1,10 +1,10 @@
 {
   "manifest_version": 2,
   "id": "khiqwq.daily_analysis",
-  "version": "3.0.0",
+  "version": "3.1.0",
   "plugin_type": "tool",
   "name": "私聊群事件日报",
-  "description": "按白名单读取 QQ 群聊天记录，生成带时间戳和回查锚点的事实型事件日报，并仅发送给指定管理员私聊。支持手动总结单群或全部群，以及次日定时生成前一完整自然日的日报；来源群全程静默。",
+  "description": "按白名单读取 QQ 群聊天记录，生成带时间戳和回查锚点的事实型事件日报，并仅发送给指定管理员私聊。支持手动总结单群或全部群、次日定时日报，以及可选的指定来源群绝对静默出站拦截。",
   "author": {
     "name": "风花叶",
     "url": "https://github.com/khiqwq"
