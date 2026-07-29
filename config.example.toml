@@ -1,0 +1,49 @@
+[plugin]
+enabled = false
+config_version = "3.1.0"
+
+[summary]
+max_events = 8
+anchors_per_event = 2
+events_per_page = 4
+max_input_messages = 1200
+include_anchor_quotes = true
+include_links = true
+
+[user_summary]
+# 兼容保留的 /mysummary。只使用群事件日报时建议关闭。
+enabled = false
+view_others_mode = "白名单"
+allowed_users = []
+slot_1 = "3H活跃轨迹"
+slot_2 = "群友画像+炫压抑评级(并排)"
+slot_3 = "语出惊人"
+slot_4 = "无"
+
+[auto_summary]
+enabled = false
+time = "00:10"
+timezone = "Asia/Shanghai"
+min_messages = 10
+# 自动与手动总结共用的来源群白名单。必须使用字符串。
+target_chats = ["123456789", "987654321"]
+# 自动日报唯一接收 QQ。留空时自动任务不会读取或生成日报。
+recipient_user = "111111111"
+
+[silence]
+# 高影响开关：拦截目标群的所有出站消息，包括其他插件输出。
+enabled = false
+# 只有同时存在于 auto_summary.target_chats 的群号才生效。
+target_chats = ["123456789"]
+
+[command_permission]
+# 允许私聊执行 /summary 的管理员。自动接收 QQ 也必须在此列表中。
+admin_users = ["111111111"]
+
+[advanced]
+# MaiBot 模型任务名，不是供应商名、URL 或具体模型名。
+model_task = "utils"
+inject_memory = false
+llm_timeout_seconds = 60
+render_timeout_seconds = 25
+group_timeout_seconds = 300
