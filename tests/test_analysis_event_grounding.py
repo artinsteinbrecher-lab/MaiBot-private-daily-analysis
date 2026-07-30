@@ -167,6 +167,7 @@ class EventGroundingTests(unittest.TestCase):
                 chunk_messages=120,
                 chunk_characters=30000,
                 retry_count=0,
+                refine_major_events=False,
             )
         )
         coverage = report["coverage"]
@@ -196,6 +197,7 @@ class EventGroundingTests(unittest.TestCase):
                 max_minor_events=30,
                 coverage_mode="full",
                 retry_count=1,
+                refine_major_events=False,
             )
         )
         self.assertEqual(calls, 2)
@@ -223,6 +225,7 @@ class EventGroundingTests(unittest.TestCase):
                 split_on_timeout=True,
                 chunk_messages=120,
                 chunk_characters=30000,
+                refine_major_events=False,
             )
         )
         self.assertEqual(calls, [80, 40, 40])
@@ -243,12 +246,73 @@ class EventGroundingTests(unittest.TestCase):
                 coverage_mode="full",
                 retry_count=0,
                 split_on_timeout=True,
+                refine_major_events=False,
             )
         )
         self.assertTrue(report["partial"])
         self.assertEqual(report["coverage"]["chunks_failed"], 1)
         self.assertEqual(report["coverage"]["coverage_percent"], 0.0)
         self.assertEqual(len(report["coverage"]["failed_ranges"]), 1)
+
+    def test_refinement_failure_keeps_compact_major_candidate(self):
+        event = self._fake_chunk_report(
+            self._bulk_messages(20),
+            importance="major",
+        )["events"][0]
+
+        async def fail_llm(*args, **kwargs):
+            return None
+
+        self.service._llm = fail_llm
+        report = asyncio.run(
+            self.service._refine_major_events(
+                {"overview": "", "events": [event]},
+                self._bulk_messages(20),
+                max_anchors=2,
+                include_links=True,
+                detail_level="full",
+            )
+        )
+        self.assertEqual(report["events"][0]["summary"], "群内讨论了有效内容。")
+        self.assertEqual(report["refinement"]["requested"], 1)
+        self.assertEqual(report["refinement"]["refined"], 0)
+        self.assertEqual(report["refinement"]["fallback"], 1)
+
+    def test_refinement_grounds_detailed_major_event(self):
+        messages = self._bulk_messages(20)
+        start_time = self.service._event_datetime(messages[0]["time"]).strftime(
+            "%H:%M"
+        )
+        candidate = self._fake_chunk_report(messages, importance="major")[
+            "events"
+        ][0]
+
+        async def refined_llm(*args, **kwargs):
+            return (
+                '{"events":[{"candidate_id":"E1","importance":"major",'
+                f'"start_time":"{start_time}","end_time":"{start_time}",'
+                '"title":"详细事件","summary":"完整记录了事情经过和背景。",'
+                '"outcomes":["已经确认"],"pending":["继续观察"],'
+                '"participants":["群友"],'
+                f'"anchors":[{{"time":"{start_time}","speaker":"群友",'
+                '"quote":"有效消息 0"}],"links":[]}]}'
+            )
+
+        self.service._llm = refined_llm
+        report = asyncio.run(
+            self.service._refine_major_events(
+                {"overview": "", "events": [candidate]},
+                messages,
+                max_anchors=2,
+                include_links=True,
+                detail_level="full",
+            )
+        )
+        event = report["events"][0]
+        self.assertTrue(event["refined"])
+        self.assertEqual(event["title"], "详细事件")
+        self.assertEqual(event["outcomes"], ["已经确认"])
+        self.assertEqual(report["refinement"]["refined"], 1)
 
 
 if __name__ == "__main__":

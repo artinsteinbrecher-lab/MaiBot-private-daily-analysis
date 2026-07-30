@@ -1,12 +1,14 @@
 [plugin]
 enabled = false
-config_version = "3.2.0"
+config_version = "3.3.0"
 
 [summary]
 coverage_mode = "均衡抽样"
 detail_level = "标准"
 max_events = 12
-max_minor_events = 30
+# 0 表示普通话题不设用户上限；插件仍保留 500 条安全上限。
+max_minor_events = 0
+refine_major_events = true
 anchors_per_event = 2
 events_per_page = 4
 # 仅用于均衡抽样模式；完整覆盖模式会分析全部有效文本消息。

@@ -16,12 +16,17 @@ import re
 import json
 import asyncio
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from collections import Counter
 from zoneinfo import ZoneInfo
 
 from .constants import AnalysisConfig
-from .event_digest import merge_event_reports_fallback, normalize_event_report
+from .event_digest import (
+    merge_adjacent_event_candidates,
+    merge_event_reports_fallback,
+    normalize_event_report,
+    partition_events,
+)
 
 
 # LLM 各任务的输出 token 上限。
@@ -37,7 +42,9 @@ _EVENT_JSON_MAX_TOKENS = 3200
 _MAX_INPUT_MESSAGES = 400
 _EVENT_CHUNK_MESSAGES = 120
 _EVENT_CHUNK_CHARACTERS = 8000
-_EVENT_MAX_CANDIDATES_PER_CHUNK = 12
+_TOPIC_MAX_CANDIDATES_PER_CHUNK = 24
+_MAJOR_REFINE_BATCH_SIZE = 4
+_EVENT_CANDIDATE_HARD_LIMIT = 1000
 
 # 并发 LLM 调用上限。设为 2：兼顾速度与"上游串行时排队不耗尽超时预算"。
 _LLM_MAX_CONCURRENCY = 2
@@ -521,8 +528,8 @@ class AnalysisService:
             return {"overview": "", "events": []}
 
         detail_instruction = self._event_detail_instruction(detail_level)
-        prompt = f"""你是一名严谨的群聊事件记录员。请从下面的 QQ 群聊记录中提取真正发生的事情，
-不要做成员活跃度、性格、MBTI、金句或娱乐排名，也不要把寒暄、复读、表情刷屏当作事件。
+        prompt = f"""你是一名严谨的群聊话题索引员。请从下面的 QQ 群聊记录中建立轻量时间线，
+不要做成员活跃度、性格、MBTI、金句或娱乐排名，也不要把纯寒暄、无意义复读、表情刷屏当作话题。
 
 这是全天记录的第 {chunk_label}/{chunk_count} 段。每条记录前的时间是唯一可信时间来源。
 {detail_instruction}
@@ -531,27 +538,28 @@ class AnalysisService:
 {chat_text}
 
 输出要求：
-1. 按时间顺序提取本段最多 {_EVENT_MAX_CANDIDATES_PER_CHUNK} 个有实际内容的事件。
-2. 事件应包括：事情经过、明确结论、待确认事项、必要参与者、重要链接。
+1. 按时间顺序提取本段最多 {_TOPIC_MAX_CANDIDATES_PER_CHUNK} 个有实际内容的话题。
+2. 这是第一阶段索引：summary 只写一两句事实概括，不展开长篇分析。
 3. start_time/end_time 和 anchors.time 必须原样取自记录中的 HH:MM，不得猜测。
-4. anchors 最多 {max_anchors} 条，只摘录便于回查的关键原话；quote 不超过 80 字。
-5. 没有重要事件时返回空 events。
-6. 只陈述记录能支持的事实；无法确认的内容写入 pending，不要自行补全。
+4. 每个话题最多保留 1 条关键原话；quote 不超过 80 字。
+5. 没有有效话题时返回空 events。
+6. 只陈述记录能支持的事实，不要自行补全结论。
 7. 链接必须逐字复制原文；{"保留重要链接" if include_links else "links 始终返回空数组"}。
-8. importance 只能是 major 或 minor。
+8. importance 只能是 major 或 minor。故障、决定、发布、重要通知、争议或持续深入讨论标为 major；
+   其他有实际内容的话题标为 minor。
 
 只返回 JSON 对象，不要 Markdown：
 {{
-  "overview": "本段概览，80字以内",
+  "overview": "本段话题概览，80字以内",
   "events": [
     {{
       "importance": "major",
       "start_time": "09:20",
       "end_time": "10:05",
       "title": "事件标题",
-      "summary": "事情经过和背景",
-      "outcomes": ["已经确定的结论"],
-      "pending": ["尚未解决或待确认事项"],
+      "summary": "一两句事实概括",
+      "outcomes": [],
+      "pending": [],
       "participants": ["与事件直接相关的人"],
       "anchors": [
         {{"time": "09:24", "speaker": "昵称", "quote": "关键原话"}}
@@ -575,11 +583,270 @@ class AnalysisService:
         return self._ground_event_report(
             parsed,
             messages,
-            max_events=_EVENT_MAX_CANDIDATES_PER_CHUNK,
-            max_minor_events=_EVENT_MAX_CANDIDATES_PER_CHUNK,
+            max_events=_TOPIC_MAX_CANDIDATES_PER_CHUNK,
+            max_minor_events=_TOPIC_MAX_CANDIDATES_PER_CHUNK,
+            max_anchors=min(1, max_anchors),
+            include_links=include_links,
+        )
+
+    @staticmethod
+    def _time_to_minutes(value: Any) -> int:
+        try:
+            hour_text, minute_text = str(value).split(":", 1)
+            hour, minute = int(hour_text), int(minute_text)
+            if 0 <= hour <= 23 and 0 <= minute <= 59:
+                return hour * 60 + minute
+        except Exception:
+            pass
+        return -1
+
+    def _messages_for_event(
+        self,
+        event: Dict[str, Any],
+        messages: List[dict],
+        *,
+        padding_minutes: int = 0,
+        max_messages: int = 0,
+    ) -> List[dict]:
+        start = self._time_to_minutes(event.get("start_time"))
+        end = self._time_to_minutes(event.get("end_time"))
+        if start < 0 or end < 0:
+            return []
+        start = max(0, start - max(0, padding_minutes))
+        end = min(23 * 60 + 59, end + max(0, padding_minutes))
+        selected = []
+        for message in messages:
+            timestamp = float(message.get("time") or 0)
+            if timestamp <= 0:
+                continue
+            moment = self._event_datetime(timestamp)
+            minute = moment.hour * 60 + moment.minute
+            if start <= minute <= end:
+                selected.append(message)
+        if max_messages > 0 and len(selected) > max_messages:
+            return self._select_time_balanced_messages(selected, max_messages)
+        return selected
+
+    def _prepare_event_candidates(
+        self,
+        report: Dict[str, Any],
+        messages: List[dict],
+        *,
+        max_events: int,
+        max_minor_events: int,
+        max_anchors: int,
+        include_links: bool,
+    ) -> Dict[str, Any]:
+        """补充源消息指标、保守提升主要事件，并分别限制两类结果。"""
+
+        events = merge_adjacent_event_candidates(
+            report.get("events") or [],
+            max_anchors=max_anchors,
+        )
+        for event in events:
+            source = self._messages_for_event(event, messages)
+            speakers = {
+                self._event_speaker(message)
+                for message in source
+                if self._event_speaker(message)
+            }
+            event["source_message_count"] = len(source)
+            event["source_participant_count"] = len(speakers)
+            start = self._time_to_minutes(event.get("start_time"))
+            end = self._time_to_minutes(event.get("end_time"))
+            duration = max(0, end - start) if start >= 0 and end >= 0 else 0
+            if event.get("importance") == "minor":
+                should_promote = (
+                    len(source) >= 28
+                    or (
+                        duration >= 20
+                        and len(source) >= 12
+                        and len(speakers) >= 4
+                    )
+                    or (bool(event.get("links")) and len(source) >= 16)
+                )
+                if should_promote:
+                    event["importance"] = "major"
+
+        major, minor = partition_events(events)
+
+        def major_score(event: Dict[str, Any]) -> float:
+            start = self._time_to_minutes(event.get("start_time"))
+            end = self._time_to_minutes(event.get("end_time"))
+            duration = max(0, end - start) if start >= 0 and end >= 0 else 0
+            return (
+                float(event.get("source_message_count") or 0) * 2.0
+                + float(event.get("source_participant_count") or 0) * 5.0
+                + duration / 4.0
+                + len(event.get("links") or []) * 4.0
+            )
+
+        major = sorted(major, key=major_score, reverse=True)[:max_events]
+        if max_minor_events > 0:
+            minor = minor[:max_minor_events]
+        selected = major + minor
+        selected.sort(
+            key=lambda item: (
+                str(item.get("start_time") or ""),
+                str(item.get("end_time") or ""),
+                str(item.get("title") or ""),
+            )
+        )
+        return normalize_event_report(
+            {"overview": report.get("overview"), "events": selected},
+            max_events=max_events,
+            max_minor_events=max(len(minor), 1) if minor else 0,
             max_anchors=max_anchors,
             include_links=include_links,
         )
+
+    async def _refine_major_batch(
+        self,
+        batch: List[Dict[str, Any]],
+        messages: List[dict],
+        *,
+        max_anchors: int,
+        include_links: bool,
+        detail_level: str,
+    ) -> Tuple[List[Dict[str, Any]], int]:
+        """批量精炼主要事件；失败事件原样返回，不影响话题索引完整性。"""
+
+        source_by_id: Dict[str, List[dict]] = {}
+        candidate_blocks: List[str] = []
+        for index, event in enumerate(batch, start=1):
+            candidate_id = f"E{index}"
+            source = self._messages_for_event(
+                event,
+                messages,
+                padding_minutes=3,
+                max_messages=70,
+            )
+            source_by_id[candidate_id] = source
+            source_text = self._format_event_messages(source)
+            if len(source_text) > 5000:
+                source_text = source_text[:5000]
+            candidate_blocks.append(
+                f"### {candidate_id}\n"
+                f"候选：{event.get('start_time')}—{event.get('end_time')}｜"
+                f"{event.get('title')}\n"
+                f"初步概括：{event.get('summary')}\n"
+                f"对应原消息：\n{source_text}"
+            )
+        prompt = f"""你是一名严谨的群聊事件编辑。下面是最多 {_MAJOR_REFINE_BATCH_SIZE} 个
+主要事件候选及其对应原消息。请逐个补充详细经过、明确结论、待确认事项、必要参与者、
+重要链接和回查原话。{self._event_detail_instruction(detail_level)}
+
+要求：
+1. 每个输入 candidate_id 最多输出一个事件，不要合并不同 ID。
+2. 时间、参与者、链接和原话只能来自对应 ID 的原消息。
+3. summary 详细说明发生过程和背景；outcomes 只写已经确认的结论；pending 写未解决事项。
+4. 每个事件最多 {max_anchors} 条回查原话。
+5. 无法进一步确认时仍返回候选事实，不得编造。
+6. importance 始终为 major。
+
+{chr(10).join(candidate_blocks)}
+
+只返回 JSON：
+{{"events":[{{"candidate_id":"E1","importance":"major","start_time":"09:20",
+"end_time":"10:05","title":"标题","summary":"详细经过","outcomes":[],
+"pending":[],"participants":[],"anchors":[],"links":[]}}]}}"""
+        result = await self._llm(
+            prompt,
+            request_type="plugin.daily_event.refine",
+            max_tokens=_EVENT_JSON_MAX_TOKENS,
+            temperature=0.2,
+        )
+        parsed = self._parse_llm_json_object(result or "")
+        raw_events = parsed.get("events") if isinstance(parsed, dict) else []
+        if not isinstance(raw_events, list):
+            raw_events = []
+        raw_by_id = {
+            str(item.get("candidate_id") or ""): item
+            for item in raw_events
+            if isinstance(item, dict)
+        }
+
+        refined: List[Dict[str, Any]] = []
+        success_count = 0
+        for index, candidate in enumerate(batch, start=1):
+            candidate_id = f"E{index}"
+            raw = raw_by_id.get(candidate_id)
+            if not raw:
+                refined.append(candidate)
+                continue
+            grounded = self._ground_event_report(
+                {"overview": "", "events": [{**raw, "importance": "major"}]},
+                source_by_id.get(candidate_id) or [],
+                max_events=1,
+                max_minor_events=0,
+                max_anchors=max_anchors,
+                include_links=include_links,
+            )
+            if not grounded.get("events"):
+                refined.append(candidate)
+                continue
+            event = grounded["events"][0]
+            event["source_message_count"] = candidate.get(
+                "source_message_count", 0
+            )
+            event["source_participant_count"] = candidate.get(
+                "source_participant_count", 0
+            )
+            event["refined"] = True
+            refined.append(event)
+            success_count += 1
+        return refined, success_count
+
+    async def _refine_major_events(
+        self,
+        report: Dict[str, Any],
+        messages: List[dict],
+        *,
+        max_anchors: int,
+        include_links: bool,
+        detail_level: str,
+    ) -> Dict[str, Any]:
+        major, minor = partition_events(report.get("events") or [])
+        if not major:
+            report["refinement"] = {
+                "requested": 0,
+                "refined": 0,
+                "fallback": 0,
+            }
+            return report
+        batches = [
+            major[index : index + _MAJOR_REFINE_BATCH_SIZE]
+            for index in range(0, len(major), _MAJOR_REFINE_BATCH_SIZE)
+        ]
+        outcomes = await asyncio.gather(
+            *(
+                self._refine_major_batch(
+                    batch,
+                    messages,
+                    max_anchors=max_anchors,
+                    include_links=include_links,
+                    detail_level=detail_level,
+                )
+                for batch in batches
+            )
+        )
+        refined_major = [event for events, _ in outcomes for event in events]
+        refined_count = sum(count for _, count in outcomes)
+        combined = refined_major + minor
+        combined.sort(
+            key=lambda item: (
+                str(item.get("start_time") or ""),
+                str(item.get("end_time") or ""),
+                str(item.get("title") or ""),
+            )
+        )
+        report["events"] = combined
+        report["refinement"] = {
+            "requested": len(major),
+            "refined": refined_count,
+            "fallback": len(major) - refined_count,
+        }
+        return report
 
     def _event_range(self, messages: List[dict]) -> Dict[str, Any]:
         timestamps = [
@@ -680,70 +947,6 @@ class AnalysisService:
             }
         ]
 
-    async def _merge_event_candidates(
-        self,
-        reports: List[Dict[str, Any]],
-        *,
-        max_events: int,
-        max_minor_events: int,
-        max_anchors: int,
-        include_links: bool,
-    ) -> Dict[str, Any]:
-        if len(reports) == 1:
-            return normalize_event_report(
-                reports[0],
-                max_events=max_events,
-                max_minor_events=max_minor_events,
-                max_anchors=max_anchors,
-                include_links=include_links,
-            )
-
-        candidates = []
-        for report in reports:
-            candidates.extend(report.get("events") or [])
-        if not candidates:
-            return {"overview": "", "events": []}
-
-        prompt = f"""下面是同一个 QQ 群一天内分段提取的事件候选。请合并跨分段延续或重复的事件，
-保留全天真正重要的事件，按时间排序。不得创造新事实、时间、原话或链接。
-
-候选事件：
-{json.dumps(candidates, ensure_ascii=False)}
-
-要求：
-1. 最多保留 {max_events} 个 major 事件和 {max_minor_events} 个 minor 动态。
-2. 每个事件最多保留 {max_anchors} 条回查锚点。
-3. 时间范围覆盖合并后事件最早到最晚的原始时间。
-4. overview 用 150—300 字概括这一天发生了什么，不写娱乐统计。
-5. 输出字段结构与候选事件一致。
-
-只返回 JSON 对象：
-{{"overview": "全天概览", "events": [...]}}"""
-        result = await self._llm(
-            prompt,
-            request_type="plugin.daily_event.merge",
-            max_tokens=_EVENT_JSON_MAX_TOKENS,
-            temperature=0.2,
-        )
-        parsed = self._parse_llm_json_object(result or "")
-        if parsed:
-            normalized = normalize_event_report(
-                parsed,
-                max_events=max_events,
-                max_minor_events=max_minor_events,
-                max_anchors=max_anchors,
-                include_links=include_links,
-            )
-            if normalized["events"]:
-                return normalized
-        return merge_event_reports_fallback(
-            reports,
-            max_events=max_events,
-            max_minor_events=max_minor_events,
-            max_anchors=max_anchors,
-            include_links=include_links,
-        )
-
     async def analyze_group_event_report(
         self,
         messages: List[dict],
@@ -759,8 +962,9 @@ class AnalysisService:
         chunk_characters: int = _EVENT_CHUNK_CHARACTERS,
         retry_count: int = 2,
         split_on_timeout: bool = True,
+        refine_major_events: bool = True,
     ) -> Dict[str, Any]:
-        """按全天时间线生成结构化群聊事件日报。"""
+        """全量建立轻量话题索引，再按需精炼主要事件。"""
 
         usable = [
             message
@@ -825,24 +1029,17 @@ class AnalysisService:
 
         if not reports:
             merged = {"overview": "", "events": []}
-        elif full_coverage or failed:
-            # 完整覆盖优先保证不丢候选：本地确定性合并不再增加一次 30 秒 RPC 风险。
+        else:
+            # 两种覆盖模式都使用本地确定性合并。第一阶段不再增加一次全局模型
+            # 合并调用，避免它成为新的 30 秒 RPC 超时点。
             merged = merge_event_reports_fallback(
                 reports,
-                max_events=max_events,
-                max_minor_events=max_minor_events,
+                max_events=_EVENT_CANDIDATE_HARD_LIMIT,
+                max_minor_events=_EVENT_CANDIDATE_HARD_LIMIT,
                 max_anchors=max_anchors,
                 include_links=include_links,
             )
-        else:
-            merged = await self._merge_event_candidates(
-                reports,
-                max_events=max_events,
-                max_minor_events=max_minor_events,
-                max_anchors=max_anchors,
-                include_links=include_links,
-            )
-        merged = self._ground_event_report(
+        merged = self._prepare_event_candidates(
             merged,
             selected,
             max_events=max_events,
@@ -850,6 +1047,21 @@ class AnalysisService:
             max_anchors=max_anchors,
             include_links=include_links,
         )
+        if refine_major_events and merged.get("events"):
+            merged = await self._refine_major_events(
+                merged,
+                selected,
+                max_anchors=max_anchors,
+                include_links=include_links,
+                detail_level=detail_level,
+            )
+        else:
+            major, _ = partition_events(merged.get("events") or [])
+            merged["refinement"] = {
+                "requested": len(major),
+                "refined": 0,
+                "fallback": len(major),
+            }
         analyzed_messages = sum(
             int(item.get("message_count") or 0) for item in successful
         )

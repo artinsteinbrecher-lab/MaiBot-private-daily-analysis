@@ -363,26 +363,21 @@ class SummaryRenderer:
     ) -> List[str]:
         """把结构化事件日报渲染成一组适合 QQ 阅读的分页 PNG。"""
 
-        events = list(report.get("events") or [])
-        if not events:
+        major_events, _ = partition_events(report.get("events") or [])
+        if not major_events:
             return []
 
         page_size = max(1, min(8, int(events_per_page or 4)))
-        major_events, minor_events = partition_events(events)
         section_pages = []
-        for section_title, section_kind, section_events in (
-            ("主要事件", "major", major_events),
-            ("其他动态", "minor", minor_events),
-        ):
-            for index in range(0, len(section_events), page_size):
-                section_pages.append(
-                    {
-                        "section_title": section_title,
-                        "section_kind": section_kind,
-                        "events": section_events[index : index + page_size],
-                        "event_offset": index,
-                    }
-                )
+        for index in range(0, len(major_events), page_size):
+            section_pages.append(
+                {
+                    "section_title": "主要事件",
+                    "section_kind": "major",
+                    "events": major_events[index : index + page_size],
+                    "event_offset": index,
+                }
+            )
 
         coverage = report.get("coverage") or {}
         images: List[str] = []

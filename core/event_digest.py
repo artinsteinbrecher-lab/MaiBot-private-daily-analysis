@@ -70,6 +70,13 @@ def _clean_string_list(value: Any, max_items: int, max_length: int) -> List[str]
     return result
 
 
+def _safe_nonnegative_int(value: Any) -> int:
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
 def _normalize_anchor(value: Any) -> Dict[str, str] | None:
     if not isinstance(value, dict):
         return None
@@ -96,6 +103,154 @@ def partition_events(events: Iterable[Dict[str, Any]]) -> Tuple[List[Dict[str, A
     for event in events:
         (minor if event.get("importance") == "minor" else major).append(event)
     return major, minor
+
+
+def _time_minutes(value: str) -> int:
+    if not is_valid_time(value):
+        return -1
+    hour, minute = value.split(":", 1)
+    return int(hour) * 60 + int(minute)
+
+
+def _topic_terms(value: Any) -> set[str]:
+    """为中文/英文短标题生成轻量字符二元组，供本地相似话题合并。"""
+
+    text = re.sub(r"[\W_]+", "", str(value or "").lower())
+    if not text:
+        return set()
+    if len(text) == 1:
+        return {text}
+    return {text[index : index + 2] for index in range(len(text) - 1)}
+
+
+def _topic_similarity(left: Dict[str, Any], right: Dict[str, Any]) -> float:
+    left_terms = _topic_terms(
+        f"{left.get('title', '')}{str(left.get('summary', ''))[:80]}"
+    )
+    right_terms = _topic_terms(
+        f"{right.get('title', '')}{str(right.get('summary', ''))[:80]}"
+    )
+    if not left_terms or not right_terms:
+        return 0.0
+    return len(left_terms & right_terms) / len(left_terms | right_terms)
+
+
+def _merge_unique(values: Iterable[Any], limit: int) -> List[str]:
+    merged: List[str] = []
+    seen = set()
+    for value in values:
+        text = _clean_text(value, 500)
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        merged.append(text)
+        if len(merged) >= limit:
+            break
+    return merged
+
+
+def merge_adjacent_event_candidates(
+    events: Iterable[Dict[str, Any]],
+    *,
+    max_anchors: int = 2,
+) -> List[Dict[str, Any]]:
+    """合并时间相邻且内容高度近似的话题，不调用模型。
+
+    只处理同一重要级别的候选，避免普通话题意外吞并主要事件。相邻分片中标题
+    完全相同，或在 20 分钟内且文本二元组相似度较高时合并。
+    """
+
+    ordered = sorted(
+        (dict(event) for event in events),
+        key=lambda item: (
+            _time_minutes(str(item.get("start_time") or "")),
+            _time_minutes(str(item.get("end_time") or "")),
+            str(item.get("title") or ""),
+        ),
+    )
+    merged: List[Dict[str, Any]] = []
+    for event in ordered:
+        if not merged:
+            merged.append(event)
+            continue
+        previous = merged[-1]
+        previous_end = _time_minutes(str(previous.get("end_time") or ""))
+        event_start = _time_minutes(str(event.get("start_time") or ""))
+        gap = event_start - previous_end
+        same_importance = (
+            previous.get("importance", "major")
+            == event.get("importance", "major")
+        )
+        same_title = _clean_text(previous.get("title"), 60) == _clean_text(
+            event.get("title"), 60
+        )
+        similar = _topic_similarity(previous, event) >= 0.42
+        if not same_importance or gap < -10 or gap > 20 or not (same_title or similar):
+            merged.append(event)
+            continue
+
+        previous["start_time"] = min(
+            str(previous.get("start_time") or ""),
+            str(event.get("start_time") or ""),
+        )
+        previous["end_time"] = max(
+            str(previous.get("end_time") or ""),
+            str(event.get("end_time") or ""),
+        )
+        previous_summary = _clean_text(previous.get("summary"), 500)
+        event_summary = _clean_text(event.get("summary"), 500)
+        if event_summary and event_summary not in previous_summary:
+            previous["summary"] = _clean_text(
+                f"{previous_summary}；{event_summary}", 500
+            )
+        previous["outcomes"] = _merge_unique(
+            list(previous.get("outcomes") or [])
+            + list(event.get("outcomes") or []),
+            6,
+        )
+        previous["pending"] = _merge_unique(
+            list(previous.get("pending") or [])
+            + list(event.get("pending") or []),
+            6,
+        )
+        previous["participants"] = _merge_unique(
+            list(previous.get("participants") or [])
+            + list(event.get("participants") or []),
+            8,
+        )
+        previous["links"] = _merge_unique(
+            list(previous.get("links") or []) + list(event.get("links") or []),
+            8,
+        )
+        anchors = list(previous.get("anchors") or []) + list(
+            event.get("anchors") or []
+        )
+        anchors.sort(key=lambda item: str(item.get("time") or ""))
+        seen_anchors = set()
+        previous["anchors"] = []
+        for anchor in anchors:
+            key = (
+                anchor.get("time"),
+                anchor.get("speaker"),
+                anchor.get("quote"),
+            )
+            if key in seen_anchors:
+                continue
+            seen_anchors.add(key)
+            previous["anchors"].append(anchor)
+            if len(previous["anchors"]) >= max_anchors:
+                break
+        previous["source_message_count"] = int(
+            previous.get("source_message_count") or 0
+        ) + int(event.get("source_message_count") or 0)
+        previous["source_participant_count"] = max(
+            int(previous.get("source_participant_count") or 0),
+            int(event.get("source_participant_count") or 0),
+        )
+        previous["refined"] = bool(previous.get("refined")) or bool(
+            event.get("refined")
+        )
+    return merged
 
 
 def normalize_event_report(
@@ -180,6 +335,13 @@ def normalize_event_report(
                 "participants": participants,
                 "anchors": anchors,
                 "links": links,
+                "source_message_count": _safe_nonnegative_int(
+                    raw.get("source_message_count")
+                ),
+                "source_participant_count": _safe_nonnegative_int(
+                    raw.get("source_participant_count")
+                ),
+                "refined": bool(raw.get("refined")),
             }
         )
 
@@ -216,8 +378,12 @@ def merge_event_reports_fallback(
             overview_parts.append(normalized["overview"])
         candidates.extend(normalized["events"])
 
+    merged_candidates = merge_adjacent_event_candidates(
+        candidates,
+        max_anchors=max_anchors,
+    )
     merged = normalize_event_report(
-        {"overview": "；".join(overview_parts), "events": candidates},
+        {"overview": "；".join(overview_parts), "events": merged_candidates},
         max_events=max_events,
         max_minor_events=max_minor_events,
         max_anchors=max_anchors,
@@ -244,7 +410,7 @@ def build_event_plain_text(
         lines.extend(["", f"概览：{overview}"])
 
     major_events, minor_events = partition_events(report.get("events") or [])
-    sections = (("主要事件", major_events), ("其他动态", minor_events))
+    sections = (("主要事件", major_events), ("其他话题时间线", minor_events))
     for section_title, section_events in sections:
         if not section_events:
             continue
@@ -257,6 +423,11 @@ def build_event_plain_text(
                     event["summary"],
                 ]
             )
+            if event.get("importance") == "minor":
+                links = event.get("links") or []
+                if links:
+                    lines.append("链接：" + " ".join(links))
+                continue
             outcomes = event.get("outcomes") or []
             if outcomes:
                 lines.append("结论：" + "；".join(outcomes))
@@ -290,6 +461,53 @@ def build_event_plain_text(
     return "\n".join(lines)
 
 
+def build_minor_topic_timeline_text(
+    group_name: str,
+    group_id: str,
+    report_date: datetime,
+    events: Iterable[Dict[str, Any]],
+) -> str:
+    """把所有普通话题整理为按小时分组、可搜索的私聊文本时间线。"""
+
+    minor_events = [
+        event
+        for event in events
+        if event.get("importance") == "minor"
+    ]
+    minor_events.sort(
+        key=lambda item: (
+            str(item.get("start_time") or ""),
+            str(item.get("end_time") or ""),
+            str(item.get("title") or ""),
+        )
+    )
+    if not minor_events:
+        return ""
+
+    lines = [
+        f"【{group_name}（{group_id}）其他话题时间线】",
+        f"日期：{report_date:%Y-%m-%d}｜共 {len(minor_events)} 个话题",
+    ]
+    current_hour = ""
+    for event in minor_events:
+        start_time = str(event.get("start_time") or "??:??")
+        hour = start_time[:2] if len(start_time) >= 2 else "??"
+        if hour != current_hour:
+            current_hour = hour
+            lines.extend(["", f"【{hour}:00—{hour}:59】"])
+        lines.append(
+            f"{start_time}—{event.get('end_time', '??:??')}｜"
+            f"{event.get('title', '未命名话题')}"
+        )
+        summary = _clean_text(event.get("summary"), 180)
+        if summary:
+            lines.append(summary)
+        links = event.get("links") or []
+        if links:
+            lines.append("链接：" + " ".join(links[:2]))
+    return "\n".join(lines).strip()
+
+
 def build_daily_index_text(
     report_date: datetime,
     period_text: str,
@@ -306,7 +524,7 @@ def build_daily_index_text(
     lines = [
         f"【{report_date:%Y-%m-%d} 群聊事件日报】",
         f"统计范围：{period_text}",
-        f"共检查 {len(group_results)} 个群，{len(with_events)} 个群有重要事件。",
+        f"共检查 {len(group_results)} 个群，{len(with_events)} 个群有有效内容。",
         "",
     ]
 
@@ -320,11 +538,8 @@ def build_daily_index_text(
             topic_items = [
                 f"{event['start_time']} {event['title']}" for event in major
             ]
-            topic_items.extend(
-                f"{event['start_time']} {event['title']}" for event in minor[:10]
-            )
-            if len(minor) > 10:
-                topic_items.append(f"另有 {len(minor) - 10} 条其他动态")
+            if minor:
+                topic_items.append(f"另有 {len(minor)} 个普通话题时间线")
             prefix = "部分完成；" if status == "partial" else ""
             lines.append(
                 f"{index}. {group_name}（{group_id}）：{prefix}"

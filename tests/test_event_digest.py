@@ -12,6 +12,8 @@ _SPEC.loader.exec_module(event_digest)
 
 build_daily_index_text = event_digest.build_daily_index_text
 build_event_plain_text = event_digest.build_event_plain_text
+build_minor_topic_timeline_text = event_digest.build_minor_topic_timeline_text
+merge_adjacent_event_candidates = event_digest.merge_adjacent_event_candidates
 merge_event_reports_fallback = event_digest.merge_event_reports_fallback
 normalize_event_report = event_digest.normalize_event_report
 parse_summary_command = event_digest.parse_summary_command
@@ -167,6 +169,31 @@ class ReportNormalizationTests(unittest.TestCase):
         self.assertIn("上午处理故障", merged["overview"])
         self.assertIn("下午恢复服务", merged["overview"])
 
+    def test_adjacent_similar_topics_are_merged_locally(self):
+        merged = merge_adjacent_event_candidates(
+            [
+                {
+                    "importance": "minor",
+                    "start_time": "09:00",
+                    "end_time": "09:10",
+                    "title": "讨论模型生成速度",
+                    "summary": "分享了模型速度测试结果。",
+                    "anchors": [],
+                },
+                {
+                    "importance": "minor",
+                    "start_time": "09:15",
+                    "end_time": "09:25",
+                    "title": "讨论模型生成速度",
+                    "summary": "继续比较不同模型的生成速度。",
+                    "anchors": [],
+                },
+            ]
+        )
+        self.assertEqual(len(merged), 1)
+        self.assertEqual(merged[0]["start_time"], "09:00")
+        self.assertEqual(merged[0]["end_time"], "09:25")
+
 
 class TextOutputTests(unittest.TestCase):
     def setUp(self):
@@ -220,6 +247,32 @@ class TextOutputTests(unittest.TestCase):
         chunks = split_message_text(text, limit=10)
         self.assertTrue(all(len(chunk) <= 10 for chunk in chunks))
         self.assertEqual("".join(chunks).replace("\n", ""), text.replace("\n", ""))
+
+    def test_minor_topic_timeline_is_timestamped_and_not_limited_by_twelve(self):
+        events = []
+        for index in range(20):
+            hour = 8 + index // 10
+            minute = (index % 10) * 5
+            events.append(
+                {
+                    "importance": "minor",
+                    "start_time": f"{hour:02d}:{minute:02d}",
+                    "end_time": f"{hour:02d}:{minute + 2:02d}",
+                    "title": f"普通话题{index + 1}",
+                    "summary": f"第{index + 1}个话题的简略记载。",
+                    "links": [],
+                }
+            )
+        text = build_minor_topic_timeline_text(
+            "测试群",
+            "123456789",
+            datetime(2026, 7, 28),
+            events,
+        )
+        self.assertIn("共 20 个话题", text)
+        self.assertIn("【08:00—08:59】", text)
+        self.assertIn("【09:00—09:59】", text)
+        self.assertIn("普通话题20", text)
 
 
 if __name__ == "__main__":

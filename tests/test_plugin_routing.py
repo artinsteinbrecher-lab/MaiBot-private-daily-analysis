@@ -262,6 +262,83 @@ class PluginRoutingTests(unittest.TestCase):
         self.assertEqual(result["status"], "partial")
         self.assertEqual(result["report"]["events"], [])
 
+    def test_minor_only_report_is_sent_as_text_without_image_rendering(self):
+        plugin = self._plugin()
+        plugin.config.auto_summary.min_messages = 1
+        plugin.config.summary = SimpleNamespace(events_per_page=4)
+        plugin.config.advanced = SimpleNamespace(
+            group_timeout_seconds=60,
+            inject_memory=False,
+        )
+
+        async def analyze(meta, *args):
+            return {
+                **meta,
+                "status": "ok",
+                "message_count": 20,
+                "report": {
+                    "overview": "普通话题概览",
+                    "events": [
+                        {
+                            "importance": "minor",
+                            "start_time": "09:00",
+                            "end_time": "09:15",
+                            "title": "讨论部署方式",
+                            "summary": "简单交流了 Docker 配置。",
+                            "outcomes": [],
+                            "pending": [],
+                            "participants": [],
+                            "anchors": [],
+                            "links": [],
+                        }
+                    ],
+                    "coverage": {
+                        "total_messages": 20,
+                        "analyzed_messages": 20,
+                        "coverage_percent": 100.0,
+                    },
+                    "refinement": {
+                        "requested": 0,
+                        "refined": 0,
+                        "fallback": 0,
+                    },
+                },
+            }
+
+        class Renderer:
+            async def generate_event_report_images(self, **kwargs):
+                raise AssertionError("普通话题不应进入图片渲染")
+
+        plugin._analyze_event_group = analyze
+        plugin._renderer = Renderer()
+        results = asyncio.run(
+            DailyAnalysisPlugin._deliver_event_reports(
+                plugin,
+                "private-stream",
+                [
+                    {
+                        "group_id": "20001",
+                        "group_name": "来源群",
+                        "stream_id": "source-stream",
+                    }
+                ],
+                start_ts=0,
+                end_ts=1,
+                report_date=datetime(2026, 7, 30),
+                period_text="2026-07-30 00:00—2026-07-30 23:59",
+                request_label="测试日报",
+            )
+        )
+        self.assertEqual(results[0]["status"], "ok")
+        self.assertFalse(
+            any(call[0] == "image" for call in plugin.ctx.send.calls)
+        )
+        sent_text = "\n".join(
+            call[2] for call in plugin.ctx.send.calls if call[0] == "text"
+        )
+        self.assertIn("其他话题时间线", sent_text)
+        self.assertIn("09:00—09:15｜讨论部署方式", sent_text)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -18,6 +18,7 @@ from .core import AnalysisService, SummaryRenderer
 from .core.event_digest import (
     build_daily_index_text,
     build_event_plain_text,
+    build_minor_topic_timeline_text,
     parse_summary_command,
     split_message_text,
 )
@@ -71,7 +72,7 @@ class PluginSection(PluginConfigBase):
         json_schema_extra={"label": "启用插件"},
     )
     config_version: str = Field(
-        default="3.2.0",
+        default="3.3.0",
         description="配置文件版本，用于兼容性校验，请勿手动修改",
         json_schema_extra={"label": "配置版本", "disabled": True},
     )
@@ -100,9 +101,17 @@ class SummarySection(PluginConfigBase):
         json_schema_extra={"label": "每群主要事件数", "hint": "推荐 12"},
     )
     max_minor_events: int = Field(
-        default=30,
-        description="每个群最多展示的其他有效动态数量；设置为 0 时不展示",
-        json_schema_extra={"label": "每群其他动态数", "hint": "完整模式推荐 30"},
+        default=0,
+        description="普通话题的独立上限；0 表示不设用户上限（仍有500条安全上限），不占主要事件名额",
+        json_schema_extra={
+            "label": "普通话题上限",
+            "hint": "推荐 0；普通话题采用简略文本时间线",
+        },
+    )
+    refine_major_events: bool = Field(
+        default=True,
+        description="完成全量话题索引后，仅对主要事件读取原消息并生成详细记录；失败时保留简略版本",
+        json_schema_extra={"label": "详细精炼主要事件"},
     )
     anchors_per_event: int = Field(
         default=2,
@@ -793,8 +802,10 @@ class DailyAnalysisPlugin(MaiBotPlugin):
         report = await self._service.analyze_group_event_report(
             messages,
             max_events=max(1, min(30, int(summary_cfg.max_events or 12))),
-            max_minor_events=max(
-                0, min(60, int(summary_cfg.max_minor_events or 0))
+            max_minor_events=(
+                500
+                if int(summary_cfg.max_minor_events or 0) <= 0
+                else min(500, int(summary_cfg.max_minor_events))
             ),
             max_anchors=(
                 max(0, min(5, int(summary_cfg.anchors_per_event or 2)))
@@ -816,6 +827,9 @@ class DailyAnalysisPlugin(MaiBotPlugin):
                 0, min(3, int(advanced_cfg.event_retry_count or 0))
             ),
             split_on_timeout=bool(advanced_cfg.split_chunk_on_failure),
+            refine_major_events=bool(
+                getattr(summary_cfg, "refine_major_events", True)
+            ),
         )
         result["report"] = report
         if report.get("partial"):
@@ -909,42 +923,75 @@ class DailyAnalysisPlugin(MaiBotPlugin):
                 if coverage
                 else ""
             )
+            refinement = report.get("refinement") or {}
+            refinement_text = (
+                f"，主要事件精炼 "
+                f"{int(refinement.get('refined') or 0)}/"
+                f"{int(refinement.get('requested') or 0)}"
+                if refinement.get("requested")
+                else ""
+            )
             partial_text = "（部分完成）" if item.get("status") == "partial" else ""
+            failed_ranges = coverage.get("failed_ranges") or []
+            failed_ranges_text = ""
+            if failed_ranges:
+                failed_ranges_text = "\n未完成时段：" + "、".join(
+                    f"{entry.get('start_time', '?')}—"
+                    f"{entry.get('end_time', '?')}"
+                    for entry in failed_ranges
+                )
             await self.ctx.send.text(
                 f"【{item['group_name']}（{item['group_id']}）】"
-                f"主要事件 {major_count} 个，其他动态 {minor_count} 个"
-                f"{coverage_text}{partial_text}",
+                f"主要事件 {major_count} 个，普通话题 {minor_count} 个"
+                f"{coverage_text}{refinement_text}{partial_text}"
+                f"{failed_ranges_text}",
                 destination_stream_id,
             )
             if not events:
                 # 部分完成但成功分片恰好没有事件时，只发送可读的覆盖状态；
                 # 没有事件不是图片渲染失败。
                 continue
-            images = await self._renderer.generate_event_report_images(
-                group_name=item["group_name"],
-                group_id=item["group_id"],
-                report_date=report_date,
-                period_text=period_text,
-                message_count=int(item.get("message_count") or 0),
-                report=report,
-                events_per_page=max(
-                    1, min(8, int(self.config.summary.events_per_page or 4))
-                ),
-            )
-            if not images:
-                item["status"] = "failed"
-                item["error"] = "图片渲染失败"
-                await self.ctx.send.text(
-                    f"{item['group_name']}（{item['group_id']}）图片渲染失败",
-                    destination_stream_id,
-                )
-                continue
-
             sent_all = True
-            for image_base64 in images:
-                sent_all = bool(
-                    await self.ctx.send.image(image_base64, destination_stream_id)
-                ) and sent_all
+            if major_count:
+                images = await self._renderer.generate_event_report_images(
+                    group_name=item["group_name"],
+                    group_id=item["group_id"],
+                    report_date=report_date,
+                    period_text=period_text,
+                    message_count=int(item.get("message_count") or 0),
+                    report=report,
+                    events_per_page=max(
+                        1, min(8, int(self.config.summary.events_per_page or 4))
+                    ),
+                )
+                if not images:
+                    item["status"] = "failed"
+                    item["error"] = "主要事件图片渲染失败"
+                    await self.ctx.send.text(
+                        f"{item['group_name']}（{item['group_id']}）"
+                        "主要事件图片渲染失败",
+                        destination_stream_id,
+                    )
+                    continue
+                for image_base64 in images:
+                    sent_all = bool(
+                        await self.ctx.send.image(
+                            image_base64, destination_stream_id
+                        )
+                    ) and sent_all
+
+            if minor_count:
+                topic_text = build_minor_topic_timeline_text(
+                    item["group_name"],
+                    item["group_id"],
+                    report_date,
+                    events,
+                )
+                if topic_text:
+                    await self._send_text_chunks(
+                        topic_text,
+                        destination_stream_id,
+                    )
             if sent_all:
                 delivered_groups += 1
                 if self.config.advanced.inject_memory:
