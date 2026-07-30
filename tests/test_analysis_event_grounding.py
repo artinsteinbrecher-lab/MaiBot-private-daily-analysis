@@ -1,3 +1,4 @@
+import asyncio
 import sys
 import types
 import unittest
@@ -115,6 +116,139 @@ class EventGroundingTests(unittest.TestCase):
         selected = self.service._select_time_balanced_messages(messages, 10)
         self.assertEqual(len(selected), 10)
         self.assertTrue(any(item.get("marker") == "quiet-hour" for item in selected))
+
+    def _bulk_messages(self, count):
+        start = datetime(2026, 7, 28, 0, 0, tzinfo=timezone.utc).timestamp()
+        return [
+            {
+                "time": start + index,
+                "user_nickname": "群友",
+                "user_cardname": "",
+                "processed_plain_text": f"有效消息 {index}",
+                "is_command": False,
+                "is_notify": False,
+            }
+            for index in range(count)
+        ]
+
+    def _fake_chunk_report(self, messages, importance="major"):
+        start_time = self.service._event_datetime(messages[0]["time"]).strftime("%H:%M")
+        end_time = self.service._event_datetime(messages[-1]["time"]).strftime("%H:%M")
+        return {
+            "overview": f"{start_time}时段动态",
+            "events": [
+                {
+                    "importance": importance,
+                    "start_time": start_time,
+                    "end_time": end_time,
+                    "title": f"{start_time}时段",
+                    "summary": "群内讨论了有效内容。",
+                    "outcomes": [],
+                    "pending": [],
+                    "participants": ["群友"],
+                    "anchors": [],
+                    "links": [],
+                }
+            ],
+        }
+
+    def test_full_coverage_accounts_for_all_3000_messages(self):
+        async def fake_extract(messages, **kwargs):
+            return self._fake_chunk_report(messages)
+
+        self.service._extract_event_chunk = fake_extract
+        report = asyncio.run(
+            self.service.analyze_group_event_report(
+                self._bulk_messages(3000),
+                max_events=30,
+                max_minor_events=30,
+                coverage_mode="full",
+                detail_level="full",
+                chunk_messages=120,
+                chunk_characters=30000,
+                retry_count=0,
+            )
+        )
+        coverage = report["coverage"]
+        self.assertEqual(coverage["total_messages"], 3000)
+        self.assertEqual(coverage["analyzed_messages"], 3000)
+        self.assertEqual(coverage["chunks_total"], 25)
+        self.assertEqual(coverage["chunks_failed"], 0)
+        self.assertEqual(coverage["coverage_percent"], 100.0)
+        self.assertFalse(report["sampled"])
+        self.assertFalse(report["partial"])
+
+    def test_failed_chunk_is_retried_before_succeeding(self):
+        calls = 0
+
+        async def flaky_extract(messages, **kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return None
+            return self._fake_chunk_report(messages)
+
+        self.service._extract_event_chunk = flaky_extract
+        report = asyncio.run(
+            self.service.analyze_group_event_report(
+                self._bulk_messages(30),
+                max_events=12,
+                max_minor_events=30,
+                coverage_mode="full",
+                retry_count=1,
+            )
+        )
+        self.assertEqual(calls, 2)
+        self.assertEqual(report["coverage"]["retry_success"], 1)
+        self.assertEqual(report["coverage"]["coverage_percent"], 100.0)
+        self.assertFalse(report["partial"])
+
+    def test_failed_chunk_is_split_and_both_halves_are_preserved(self):
+        calls = []
+
+        async def size_sensitive_extract(messages, **kwargs):
+            calls.append(len(messages))
+            if len(messages) > 40:
+                return None
+            return self._fake_chunk_report(messages, importance="minor")
+
+        self.service._extract_event_chunk = size_sensitive_extract
+        report = asyncio.run(
+            self.service.analyze_group_event_report(
+                self._bulk_messages(80),
+                max_events=12,
+                max_minor_events=30,
+                coverage_mode="full",
+                retry_count=0,
+                split_on_timeout=True,
+                chunk_messages=120,
+                chunk_characters=30000,
+            )
+        )
+        self.assertEqual(calls, [80, 40, 40])
+        self.assertEqual(report["coverage"]["chunks_total"], 2)
+        self.assertEqual(report["coverage"]["split_chunks"], 2)
+        self.assertEqual(report["coverage"]["analyzed_messages"], 80)
+        self.assertEqual(report["coverage"]["coverage_percent"], 100.0)
+        self.assertFalse(report["partial"])
+
+    def test_unrecoverable_chunk_marks_report_partial_with_failed_range(self):
+        async def always_fail(messages, **kwargs):
+            return None
+
+        self.service._extract_event_chunk = always_fail
+        report = asyncio.run(
+            self.service.analyze_group_event_report(
+                self._bulk_messages(30),
+                coverage_mode="full",
+                retry_count=0,
+                split_on_timeout=True,
+            )
+        )
+        self.assertTrue(report["partial"])
+        self.assertEqual(report["coverage"]["chunks_failed"], 1)
+        self.assertEqual(report["coverage"]["coverage_percent"], 0.0)
+        self.assertEqual(len(report["coverage"]["failed_ranges"]), 1)
 
 
 if __name__ == "__main__":

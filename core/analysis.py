@@ -35,8 +35,9 @@ _EVENT_JSON_MAX_TOKENS = 3200
 
 # LLM 输入消息上限：取最近 N 条参与总结/话题/金句，避免超大群 prompt 过长拖慢生成
 _MAX_INPUT_MESSAGES = 400
-_EVENT_CHUNK_MESSAGES = 160
-_EVENT_CHUNK_CHARACTERS = 14000
+_EVENT_CHUNK_MESSAGES = 120
+_EVENT_CHUNK_CHARACTERS = 8000
+_EVENT_MAX_CANDIDATES_PER_CHUNK = 12
 
 # 并发 LLM 调用上限。设为 2：兼顾速度与"上游串行时排队不耗尽超时预算"。
 _LLM_MAX_CONCURRENCY = 2
@@ -307,9 +308,19 @@ class AnalysisService:
         return selected
 
     @staticmethod
-    def _chunk_event_messages(messages: List[dict]) -> List[List[dict]]:
+    def _chunk_event_messages(
+        messages: List[dict],
+        *,
+        max_messages: int = _EVENT_CHUNK_MESSAGES,
+        max_characters: int = _EVENT_CHUNK_CHARACTERS,
+    ) -> List[List[dict]]:
         """按消息数和字符数切分，控制单次 LLM 请求体积。"""
 
+        max_messages = max(20, min(300, int(max_messages or _EVENT_CHUNK_MESSAGES)))
+        max_characters = max(
+            2000,
+            min(30000, int(max_characters or _EVENT_CHUNK_CHARACTERS)),
+        )
         chunks: List[List[dict]] = []
         current: List[dict] = []
         current_chars = 0
@@ -317,8 +328,8 @@ class AnalysisService:
             text = str(message.get("processed_plain_text") or "")
             estimated = len(text) + 60
             if current and (
-                len(current) >= _EVENT_CHUNK_MESSAGES
-                or current_chars + estimated > _EVENT_CHUNK_CHARACTERS
+                len(current) >= max_messages
+                or current_chars + estimated > max_characters
             ):
                 chunks.append(current)
                 current = []
@@ -371,6 +382,7 @@ class AnalysisService:
         messages: List[dict],
         *,
         max_events: int,
+        max_minor_events: int = 0,
         max_anchors: int,
         include_links: bool,
     ) -> Dict[str, Any]:
@@ -471,46 +483,69 @@ class AnalysisService:
         return normalize_event_report(
             {"overview": value.get("overview"), "events": grounded_events},
             max_events=max_events,
+            max_minor_events=max_minor_events,
             max_anchors=max_anchors,
             include_links=include_links,
+        )
+
+    @staticmethod
+    def _event_detail_instruction(detail_level: str) -> str:
+        if detail_level == "full":
+            return (
+                "完整模式：除纯寒暄、无意义复读和纯表情刷屏外，分享、求助、测试、"
+                "故障、决定、争议、教程、资源发布和有明确内容的普通话题都应记录。"
+                "重大决定或持续讨论标为 major，其余有效动态标为 minor。"
+            )
+        if detail_level == "concise":
+            return (
+                "精简模式：只记录明确决定、故障、发布、重要通知或持续深入讨论，"
+                "全部标为 major；普通话题不记录。"
+            )
+        return (
+            "标准模式：记录重要事件及有实际内容的普通话题；重要事项标为 major，"
+            "较小但可回查的有效动态标为 minor。"
         )
 
     async def _extract_event_chunk(
         self,
         messages: List[dict],
         *,
-        max_events: int,
         max_anchors: int,
         include_links: bool,
-        chunk_index: int,
+        detail_level: str,
+        chunk_label: str,
         chunk_count: int,
-    ) -> Dict[str, Any]:
+    ) -> Optional[Dict[str, Any]]:
         chat_text = self._format_event_messages(messages)
         if not chat_text:
             return {"overview": "", "events": []}
 
+        detail_instruction = self._event_detail_instruction(detail_level)
         prompt = f"""你是一名严谨的群聊事件记录员。请从下面的 QQ 群聊记录中提取真正发生的事情，
 不要做成员活跃度、性格、MBTI、金句或娱乐排名，也不要把寒暄、复读、表情刷屏当作事件。
 
-这是全天记录的第 {chunk_index}/{chunk_count} 段。每条记录前的时间是唯一可信时间来源。
+这是全天记录的第 {chunk_label}/{chunk_count} 段。每条记录前的时间是唯一可信时间来源。
+{detail_instruction}
 
 群聊记录：
 {chat_text}
 
 输出要求：
-1. 按时间顺序提取本段最多 {max_events} 个有实际内容的事件。
+1. 按时间顺序提取本段最多 {_EVENT_MAX_CANDIDATES_PER_CHUNK} 个有实际内容的事件。
 2. 事件应包括：事情经过、明确结论、待确认事项、必要参与者、重要链接。
 3. start_time/end_time 和 anchors.time 必须原样取自记录中的 HH:MM，不得猜测。
 4. anchors 最多 {max_anchors} 条，只摘录便于回查的关键原话；quote 不超过 80 字。
 5. 没有重要事件时返回空 events。
 6. 只陈述记录能支持的事实；无法确认的内容写入 pending，不要自行补全。
 7. 链接必须逐字复制原文；{"保留重要链接" if include_links else "links 始终返回空数组"}。
+8. importance 只能是 major 或 minor。
 
 只返回 JSON 对象，不要 Markdown：
 {{
   "overview": "本段概览，80字以内",
   "events": [
     {{
+      "importance": "major",
       "start_time": "09:20",
       "end_time": "10:05",
       "title": "事件标题",
@@ -531,20 +566,126 @@ class AnalysisService:
             max_tokens=_EVENT_JSON_MAX_TOKENS,
             temperature=0.2,
         )
-        parsed = self._parse_llm_json_object(result or "") or {}
+        if not result:
+            return None
+        parsed = self._parse_llm_json_object(result)
+        if parsed is None:
+            self.logger.warning(f"事件分段 {chunk_label}/{chunk_count} 返回了无效 JSON")
+            return None
         return self._ground_event_report(
             parsed,
             messages,
-            max_events=max_events,
+            max_events=_EVENT_MAX_CANDIDATES_PER_CHUNK,
+            max_minor_events=_EVENT_MAX_CANDIDATES_PER_CHUNK,
             max_anchors=max_anchors,
             include_links=include_links,
         )
+
+    def _event_range(self, messages: List[dict]) -> Dict[str, Any]:
+        timestamps = [
+            float(message.get("time") or 0)
+            for message in messages
+            if float(message.get("time") or 0) > 0
+        ]
+        if not timestamps:
+            return {
+                "start_time": "?",
+                "end_time": "?",
+                "message_count": len(messages),
+            }
+        return {
+            "start_time": self._event_datetime(min(timestamps)).strftime("%H:%M"),
+            "end_time": self._event_datetime(max(timestamps)).strftime("%H:%M"),
+            "message_count": len(messages),
+        }
+
+    async def _extract_event_chunk_resilient(
+        self,
+        messages: List[dict],
+        *,
+        max_anchors: int,
+        include_links: bool,
+        detail_level: str,
+        chunk_label: str,
+        chunk_count: int,
+        retry_count: int,
+        split_on_timeout: bool,
+        split_depth: int = 0,
+    ) -> List[Dict[str, Any]]:
+        """失败时重试；仍失败则把当前时段一分为二，绝不静默吞掉缺失区间。"""
+
+        retries = max(0, min(3, int(retry_count or 0)))
+        for attempt in range(retries + 1):
+            report = await self._extract_event_chunk(
+                messages,
+                max_anchors=max_anchors,
+                include_links=include_links,
+                detail_level=detail_level,
+                chunk_label=chunk_label,
+                chunk_count=chunk_count,
+            )
+            if report is not None:
+                return [
+                    {
+                        "success": True,
+                        "report": report,
+                        "message_count": len(messages),
+                        "retried": attempt > 0,
+                        "from_split": split_depth > 0,
+                        **self._event_range(messages),
+                    }
+                ]
+
+        can_split = (
+            split_on_timeout
+            and split_depth < 1
+            and len(messages) >= 40
+        )
+        if can_split:
+            midpoint = len(messages) // 2
+            left, right = messages[:midpoint], messages[midpoint:]
+            nested = await asyncio.gather(
+                self._extract_event_chunk_resilient(
+                    left,
+                    max_anchors=max_anchors,
+                    include_links=include_links,
+                    detail_level=detail_level,
+                    chunk_label=f"{chunk_label}.1",
+                    chunk_count=chunk_count,
+                    retry_count=retry_count,
+                    split_on_timeout=split_on_timeout,
+                    split_depth=split_depth + 1,
+                ),
+                self._extract_event_chunk_resilient(
+                    right,
+                    max_anchors=max_anchors,
+                    include_links=include_links,
+                    detail_level=detail_level,
+                    chunk_label=f"{chunk_label}.2",
+                    chunk_count=chunk_count,
+                    retry_count=retry_count,
+                    split_on_timeout=split_on_timeout,
+                    split_depth=split_depth + 1,
+                ),
+            )
+            return [item for group in nested for item in group]
+
+        return [
+            {
+                "success": False,
+                "report": {"overview": "", "events": []},
+                "retried": retries > 0,
+                "from_split": split_depth > 0,
+                **self._event_range(messages),
+            }
+        ]
 
     async def _merge_event_candidates(
         self,
         reports: List[Dict[str, Any]],
         *,
         max_events: int,
+        max_minor_events: int,
         max_anchors: int,
         include_links: bool,
     ) -> Dict[str, Any]:
@@ -552,6 +693,7 @@ class AnalysisService:
             return normalize_event_report(
                 reports[0],
                 max_events=max_events,
+                max_minor_events=max_minor_events,
                 max_anchors=max_anchors,
                 include_links=include_links,
             )
@@ -569,7 +711,7 @@ class AnalysisService:
 {json.dumps(candidates, ensure_ascii=False)}
 
 要求：
-1. 最多保留 {max_events} 个事件。
+1. 最多保留 {max_events} 个 major 事件和 {max_minor_events} 个 minor 动态。
 2. 每个事件最多保留 {max_anchors} 条回查锚点。
 3. 时间范围覆盖合并后事件最早到最晚的原始时间。
 4. overview 用 150—300 字概括这一天发生了什么，不写娱乐统计。
@@ -588,6 +730,7 @@ class AnalysisService:
             normalized = normalize_event_report(
                 parsed,
                 max_events=max_events,
+                max_minor_events=max_minor_events,
                 max_anchors=max_anchors,
                 include_links=include_links,
             )
@@ -596,6 +739,7 @@ class AnalysisService:
         return merge_event_reports_fallback(
             reports,
             max_events=max_events,
+            max_minor_events=max_minor_events,
             max_anchors=max_anchors,
             include_links=include_links,
         )
@@ -605,9 +749,16 @@ class AnalysisService:
         messages: List[dict],
         *,
         max_events: int = 8,
+        max_minor_events: int = 0,
         max_anchors: int = 2,
         max_input_messages: int = 1200,
         include_links: bool = True,
+        coverage_mode: str = "balanced",
+        detail_level: str = "standard",
+        chunk_messages: int = _EVENT_CHUNK_MESSAGES,
+        chunk_characters: int = _EVENT_CHUNK_CHARACTERS,
+        retry_count: int = 2,
+        split_on_timeout: bool = True,
     ) -> Dict[str, Any]:
         """按全天时间线生成结构化群聊事件日报。"""
 
@@ -618,44 +769,123 @@ class AnalysisService:
             and not message.get("is_command")
             and not message.get("is_notify")
         ]
-        sampled = len(usable) > max_input_messages > 0
-        selected = self._select_time_balanced_messages(usable, max_input_messages)
-        chunks = self._chunk_event_messages(selected)
+        full_coverage = coverage_mode == "full"
+        selected = (
+            list(usable)
+            if full_coverage
+            else self._select_time_balanced_messages(usable, max_input_messages)
+        )
+        sampled = len(selected) < len(usable)
+        chunks = self._chunk_event_messages(
+            selected,
+            max_messages=chunk_messages,
+            max_characters=chunk_characters,
+        )
         if not chunks:
             return {
                 "overview": "",
                 "events": [],
                 "sampled": sampled,
                 "analyzed_message_count": 0,
+                "partial": False,
+                "coverage": {
+                    "mode": coverage_mode,
+                    "total_messages": len(usable),
+                    "selected_messages": len(selected),
+                    "analyzed_messages": 0,
+                    "coverage_percent": 0.0,
+                    "chunks_total": 0,
+                    "chunks_success": 0,
+                    "chunks_failed": 0,
+                    "retry_success": 0,
+                    "split_chunks": 0,
+                    "failed_ranges": [],
+                },
             }
 
-        reports: List[Dict[str, Any]] = []
-        for index, chunk in enumerate(chunks, start=1):
-            report = await self._extract_event_chunk(
-                chunk,
+        nested_outcomes = await asyncio.gather(
+            *(
+                self._extract_event_chunk_resilient(
+                    chunk,
+                    max_anchors=max_anchors,
+                    include_links=include_links,
+                    detail_level=detail_level,
+                    chunk_label=str(index),
+                    chunk_count=len(chunks),
+                    retry_count=retry_count,
+                    split_on_timeout=split_on_timeout,
+                )
+                for index, chunk in enumerate(chunks, start=1)
+            )
+        )
+        outcomes = [item for group in nested_outcomes for item in group]
+        successful = [item for item in outcomes if item.get("success")]
+        failed = [item for item in outcomes if not item.get("success")]
+        reports = [item["report"] for item in successful]
+
+        if not reports:
+            merged = {"overview": "", "events": []}
+        elif full_coverage or failed:
+            # 完整覆盖优先保证不丢候选：本地确定性合并不再增加一次 30 秒 RPC 风险。
+            merged = merge_event_reports_fallback(
+                reports,
                 max_events=max_events,
+                max_minor_events=max_minor_events,
                 max_anchors=max_anchors,
                 include_links=include_links,
-                chunk_index=index,
-                chunk_count=len(chunks),
             )
-            reports.append(report)
-
-        merged = await self._merge_event_candidates(
-            reports,
-            max_events=max_events,
-            max_anchors=max_anchors,
-            include_links=include_links,
-        )
+        else:
+            merged = await self._merge_event_candidates(
+                reports,
+                max_events=max_events,
+                max_minor_events=max_minor_events,
+                max_anchors=max_anchors,
+                include_links=include_links,
+            )
         merged = self._ground_event_report(
             merged,
             selected,
             max_events=max_events,
+            max_minor_events=max_minor_events,
             max_anchors=max_anchors,
             include_links=include_links,
         )
+        analyzed_messages = sum(
+            int(item.get("message_count") or 0) for item in successful
+        )
+        coverage_percent = (
+            min(100.0, analyzed_messages * 100.0 / len(usable))
+            if usable
+            else 100.0
+        )
+        failed_ranges = [
+            {
+                "start_time": item.get("start_time") or "?",
+                "end_time": item.get("end_time") or "?",
+                "message_count": int(item.get("message_count") or 0),
+            }
+            for item in failed
+        ]
         merged["sampled"] = sampled
-        merged["analyzed_message_count"] = len(selected)
+        merged["partial"] = bool(failed)
+        merged["analyzed_message_count"] = analyzed_messages
+        merged["coverage"] = {
+            "mode": coverage_mode,
+            "total_messages": len(usable),
+            "selected_messages": len(selected),
+            "analyzed_messages": analyzed_messages,
+            "coverage_percent": round(coverage_percent, 1),
+            "chunks_total": len(outcomes),
+            "chunks_success": len(successful),
+            "chunks_failed": len(failed),
+            "retry_success": sum(
+                1 for item in successful if item.get("retried")
+            ),
+            "split_chunks": sum(
+                1 for item in outcomes if item.get("from_split")
+            ),
+            "failed_ranges": failed_ranges,
+        }
         return merged
 
     # ==================== 群聊整体分析（LLM） ====================

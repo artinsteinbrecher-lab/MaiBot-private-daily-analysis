@@ -81,10 +81,28 @@ def _normalize_anchor(value: Any) -> Dict[str, str] | None:
     return {"time": time_value, "speaker": speaker, "quote": quote}
 
 
+def _normalize_importance(value: Any) -> str:
+    text = str(value or "").strip().lower()
+    if text in {"minor", "动态", "其他", "普通", "次要"}:
+        return "minor"
+    return "major"
+
+
+def partition_events(events: Iterable[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """按重要程度拆分事件，同时保持各自的时间顺序。"""
+
+    major: List[Dict[str, Any]] = []
+    minor: List[Dict[str, Any]] = []
+    for event in events:
+        (minor if event.get("importance") == "minor" else major).append(event)
+    return major, minor
+
+
 def normalize_event_report(
     value: Any,
     *,
     max_events: int = 8,
+    max_minor_events: int = 0,
     max_anchors: int = 2,
     include_links: bool = True,
 ) -> Dict[str, Any]:
@@ -152,6 +170,7 @@ def normalize_event_report(
 
         events.append(
             {
+                "importance": _normalize_importance(raw.get("importance")),
                 "start_time": start_time,
                 "end_time": end_time,
                 "title": title,
@@ -165,13 +184,19 @@ def normalize_event_report(
         )
 
     events.sort(key=lambda item: (item["start_time"], item["end_time"], item["title"]))
-    return {"overview": overview, "events": events[: max(1, int(max_events or 8))]}
+    major, minor = partition_events(events)
+    major_limit = max(1, int(max_events or 8))
+    minor_limit = max(0, int(max_minor_events or 0))
+    selected = major[:major_limit] + minor[:minor_limit]
+    selected.sort(key=lambda item: (item["start_time"], item["end_time"], item["title"]))
+    return {"overview": overview, "events": selected}
 
 
 def merge_event_reports_fallback(
     reports: Iterable[Dict[str, Any]],
     *,
     max_events: int,
+    max_minor_events: int = 0,
     max_anchors: int,
     include_links: bool,
 ) -> Dict[str, Any]:
@@ -183,6 +208,7 @@ def merge_event_reports_fallback(
         normalized = normalize_event_report(
             report,
             max_events=max_events * 4,
+            max_minor_events=max_minor_events * 4,
             max_anchors=max_anchors,
             include_links=include_links,
         )
@@ -193,6 +219,7 @@ def merge_event_reports_fallback(
     merged = normalize_event_report(
         {"overview": "；".join(overview_parts), "events": candidates},
         max_events=max_events,
+        max_minor_events=max_minor_events,
         max_anchors=max_anchors,
         include_links=include_links,
     )
@@ -216,25 +243,50 @@ def build_event_plain_text(
     if overview:
         lines.extend(["", f"概览：{overview}"])
 
-    for index, event in enumerate(report.get("events") or [], start=1):
+    major_events, minor_events = partition_events(report.get("events") or [])
+    sections = (("主要事件", major_events), ("其他动态", minor_events))
+    for section_title, section_events in sections:
+        if not section_events:
+            continue
+        lines.extend(["", f"【{section_title}】"])
+        for index, event in enumerate(section_events, start=1):
+            lines.extend(
+                [
+                    "",
+                    f"{index}. {event['start_time']}—{event['end_time']}｜{event['title']}",
+                    event["summary"],
+                ]
+            )
+            outcomes = event.get("outcomes") or []
+            if outcomes:
+                lines.append("结论：" + "；".join(outcomes))
+            pending = event.get("pending") or []
+            if pending:
+                lines.append("待确认：" + "；".join(pending))
+            for anchor in event.get("anchors") or []:
+                lines.append(f"回查：{anchor['time']} {anchor['speaker']}：{anchor['quote']}")
+            links = event.get("links") or []
+            if links:
+                lines.append("链接：" + " ".join(links))
+
+    coverage = report.get("coverage") or {}
+    if coverage:
         lines.extend(
             [
                 "",
-                f"{index}. {event['start_time']}—{event['end_time']}｜{event['title']}",
-                event["summary"],
+                "【完整度】"
+                f"原始 {int(coverage.get('total_messages') or 0)} 条，"
+                f"实际分析 {int(coverage.get('analyzed_messages') or 0)} 条，"
+                f"覆盖率 {float(coverage.get('coverage_percent') or 0):.1f}%。",
             ]
         )
-        outcomes = event.get("outcomes") or []
-        if outcomes:
-            lines.append("结论：" + "；".join(outcomes))
-        pending = event.get("pending") or []
-        if pending:
-            lines.append("待确认：" + "；".join(pending))
-        for anchor in event.get("anchors") or []:
-            lines.append(f"回查：{anchor['time']} {anchor['speaker']}：{anchor['quote']}")
-        links = event.get("links") or []
-        if links:
-            lines.append("链接：" + " ".join(links))
+        failed_ranges = coverage.get("failed_ranges") or []
+        if failed_ranges:
+            ranges = "、".join(
+                f"{item.get('start_time', '?')}—{item.get('end_time', '?')}"
+                for item in failed_ranges
+            )
+            lines.append("未完成时段：" + ranges)
     return "\n".join(lines)
 
 
@@ -246,7 +298,10 @@ def build_daily_index_text(
     """生成可在 QQ 中搜索的纯文本日报总目录。"""
 
     with_events = [
-        item for item in group_results if item.get("status") == "ok" and item.get("report", {}).get("events")
+        item
+        for item in group_results
+        if item.get("status") in {"ok", "partial"}
+        and item.get("report", {}).get("events")
     ]
     lines = [
         f"【{report_date:%Y-%m-%d} 群聊事件日报】",
@@ -259,12 +314,22 @@ def build_daily_index_text(
         group_name = item.get("group_name") or f"群{item.get('group_id', '')}"
         group_id = item.get("group_id") or ""
         status = item.get("status")
-        if status == "ok":
+        if status in {"ok", "partial"}:
             events = item.get("report", {}).get("events") or []
-            topics = "；".join(
-                f"{event['start_time']} {event['title']}" for event in events
+            major, minor = partition_events(events)
+            topic_items = [
+                f"{event['start_time']} {event['title']}" for event in major
+            ]
+            topic_items.extend(
+                f"{event['start_time']} {event['title']}" for event in minor[:10]
             )
-            lines.append(f"{index}. {group_name}（{group_id}）：{topics}")
+            if len(minor) > 10:
+                topic_items.append(f"另有 {len(minor) - 10} 条其他动态")
+            prefix = "部分完成；" if status == "partial" else ""
+            lines.append(
+                f"{index}. {group_name}（{group_id}）：{prefix}"
+                + "；".join(topic_items)
+            )
         elif status == "insufficient":
             lines.append(f"{index}. {group_name}（{group_id}）：消息不足，未生成")
         elif status == "empty":

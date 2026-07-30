@@ -23,6 +23,7 @@ from typing import Any, Dict, List, Optional
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
 from .constants import AnalysisConfig
+from .event_digest import partition_events
 
 # 可选 HTTP 库：优先 httpx（MaiBot 主程序在用），其次 aiohttp。两者皆无则禁用预取。
 try:
@@ -367,12 +368,25 @@ class SummaryRenderer:
             return []
 
         page_size = max(1, min(8, int(events_per_page or 4)))
-        event_pages = [
-            events[index : index + page_size]
-            for index in range(0, len(events), page_size)
-        ]
+        major_events, minor_events = partition_events(events)
+        section_pages = []
+        for section_title, section_kind, section_events in (
+            ("主要事件", "major", major_events),
+            ("其他动态", "minor", minor_events),
+        ):
+            for index in range(0, len(section_events), page_size):
+                section_pages.append(
+                    {
+                        "section_title": section_title,
+                        "section_kind": section_kind,
+                        "events": section_events[index : index + page_size],
+                        "event_offset": index,
+                    }
+                )
+
+        coverage = report.get("coverage") or {}
         images: List[str] = []
-        for page_index, page_events in enumerate(event_pages, start=1):
+        for page_index, page in enumerate(section_pages, start=1):
             html_content = self._render_template(
                 "event_report_template.html",
                 group_name=group_name,
@@ -383,12 +397,21 @@ class SummaryRenderer:
                 analyzed_message_count=int(
                     report.get("analyzed_message_count") or message_count
                 ),
-                sampled=bool(report.get("sampled")),
+                sampled=bool(report.get("sampled")) if page_index == 1 else False,
+                partial=bool(report.get("partial")) if page_index == 1 else False,
+                coverage=coverage if page_index == 1 else {},
+                failed_ranges=(
+                    coverage.get("failed_ranges") or []
+                    if page_index == 1
+                    else []
+                ),
                 overview=str(report.get("overview") or "") if page_index == 1 else "",
-                events=page_events,
-                event_offset=(page_index - 1) * page_size,
+                section_title=page["section_title"],
+                section_kind=page["section_kind"],
+                events=page["events"],
+                event_offset=page["event_offset"],
                 page_index=page_index,
-                page_count=len(event_pages),
+                page_count=len(section_pages),
             )
             if not html_content:
                 self.logger.error(

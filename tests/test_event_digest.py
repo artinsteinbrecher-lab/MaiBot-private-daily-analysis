@@ -106,6 +106,32 @@ class ReportNormalizationTests(unittest.TestCase):
         self.assertEqual(report["events"][0]["anchors"], [])
         self.assertEqual(report["events"][0]["links"], [])
 
+    def test_major_and_minor_limits_are_independent(self):
+        events = []
+        for index, importance in enumerate(
+            ["major", "major", "minor", "minor", "minor"],
+            start=1,
+        ):
+            events.append(
+                {
+                    "importance": importance,
+                    "start_time": f"0{index}:00",
+                    "end_time": f"0{index}:05",
+                    "title": f"事件{index}",
+                    "summary": "有效内容",
+                }
+            )
+        report = normalize_event_report(
+            {"events": events},
+            max_events=1,
+            max_minor_events=2,
+            max_anchors=0,
+        )
+        self.assertEqual(
+            [event["importance"] for event in report["events"]],
+            ["major", "minor", "minor"],
+        )
+
     def test_fallback_merge_is_deterministic(self):
         reports = [
             {

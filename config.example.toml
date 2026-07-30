@@ -1,11 +1,15 @@
 [plugin]
 enabled = false
-config_version = "3.1.0"
+config_version = "3.2.0"
 
 [summary]
-max_events = 8
+coverage_mode = "均衡抽样"
+detail_level = "标准"
+max_events = 12
+max_minor_events = 30
 anchors_per_event = 2
 events_per_page = 4
+# 仅用于均衡抽样模式；完整覆盖模式会分析全部有效文本消息。
 max_input_messages = 1200
 include_anchor_quotes = true
 include_links = true
@@ -30,12 +34,6 @@ target_chats = ["123456789", "987654321"]
 # 自动日报唯一接收 QQ。留空时自动任务不会读取或生成日报。
 recipient_user = "111111111"
 
-[silence]
-# 高影响开关：拦截目标群的所有出站消息，包括其他插件输出。
-enabled = false
-# 只有同时存在于 auto_summary.target_chats 的群号才生效。
-target_chats = ["123456789"]
-
 [command_permission]
 # 允许私聊执行 /summary 的管理员。自动接收 QQ 也必须在此列表中。
 admin_users = ["111111111"]
@@ -46,4 +44,8 @@ model_task = "utils"
 inject_memory = false
 llm_timeout_seconds = 60
 render_timeout_seconds = 25
-group_timeout_seconds = 300
+group_timeout_seconds = 900
+event_chunk_messages = 120
+event_chunk_characters = 8000
+event_retry_count = 2
+split_chunk_on_failure = true

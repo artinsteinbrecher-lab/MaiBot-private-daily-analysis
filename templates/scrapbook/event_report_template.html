@@ -60,6 +60,25 @@
             border-radius: 8px;
             font-size: 17px;
         }
+        .coverage {
+            margin-top: 14px;
+            padding: 13px 15px;
+            color: #14532d;
+            background: #f0fdf4;
+            border-left: 5px solid #22c55e;
+            border-radius: 8px;
+            font-size: 17px;
+        }
+        .coverage.partial {
+            color: #991b1b;
+            background: #fef2f2;
+            border-left-color: #ef4444;
+        }
+        .coverage strong { font-weight: 800; }
+        .failed-ranges {
+            margin-top: 7px;
+            color: #991b1b;
+        }
         .overview {
             margin: 28px 0 30px;
             padding: 22px 24px;
@@ -73,6 +92,17 @@
             font-size: 24px;
         }
         .overview p { margin: 0; }
+        .section-title {
+            margin: 30px 0 4px;
+            padding-left: 14px;
+            color: #155e75;
+            border-left: 6px solid #0e7490;
+            font-size: 27px;
+        }
+        .section-title.minor {
+            color: #6d28d9;
+            border-left-color: #8b5cf6;
+        }
         .event {
             position: relative;
             margin-top: 26px;
@@ -82,6 +112,10 @@
             border-radius: 16px;
             background: #fbfdff;
             break-inside: avoid;
+        }
+        .event.minor {
+            border-left-color: #8b5cf6;
+            background: #fdfcff;
         }
         .event-header {
             display: flex;
@@ -99,6 +133,7 @@
             font-size: 20px;
             white-space: nowrap;
         }
+        .event.minor .time { background: #7c3aed; }
         .event-title {
             margin: 1px 0 0;
             color: #0f172a;
@@ -173,10 +208,30 @@
             <span>{{ period_text }}</span>
             <span>{{ message_count }} 条消息</span>
         </div>
-        {% if sampled %}
+        {% if coverage %}
+        <div class="coverage{% if partial %} partial{% endif %}">
+            <strong>
+                {% if coverage.mode == "full" %}完整覆盖{% else %}均衡抽样{% endif %}
+                · 覆盖率 {{ coverage.coverage_percent }}%
+            </strong>
+            ｜原始 {{ coverage.total_messages }} 条，实际分析
+            {{ coverage.analyzed_messages }} 条｜分段
+            {{ coverage.chunks_success }}/{{ coverage.chunks_total }}
+            {% if coverage.retry_success %}｜重试成功 {{ coverage.retry_success }} 段{% endif %}
+            {% if coverage.split_chunks %}｜拆分子段 {{ coverage.split_chunks }} 个{% endif %}
+            {% if failed_ranges %}
+            <div class="failed-ranges">
+                未完成时段：
+                {% for item in failed_ranges %}
+                    {{ item.start_time }}—{{ item.end_time }}（{{ item.message_count }}条）
+                    {% if not loop.last %}、{% endif %}
+                {% endfor %}
+            </div>
+            {% endif %}
+        </div>
+        {% elif sampled %}
         <div class="sampled">
-            高流量群：共 {{ message_count }} 条消息，本次按全天时段均衡分析
-            {{ analyzed_message_count }} 条。时间线覆盖全天，但细节可能有抽样。
+            高流量群：共 {{ message_count }} 条消息，本次分析 {{ analyzed_message_count }} 条。
         </div>
         {% endif %}
     </header>
@@ -188,8 +243,10 @@
     </section>
     {% endif %}
 
+    <h2 class="section-title {{ section_kind }}">{{ section_title }}</h2>
+
     {% for event in events %}
-    <article class="event">
+    <article class="event {{ section_kind }}">
         <div class="event-header">
             <div class="time">{{ event.start_time }}—{{ event.end_time }}</div>
             <h2 class="event-title">{{ event_offset + loop.index }}. {{ event.title }}</h2>
@@ -243,7 +300,7 @@
     {% endfor %}
 
     <footer class="footer">
-        <span>仅基于所选时间范围内的群聊记录生成</span>
+        <span>仅基于群聊记录生成；完整度见页首</span>
         <span>第 {{ page_index }} / {{ page_count }} 页</span>
     </footer>
 </main>
