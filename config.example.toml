@@ -1,6 +1,6 @@
 [plugin]
 enabled = false
-config_version = "3.3.1"
+config_version = "3.4.0"
 
 [summary]
 coverage_mode = "均衡抽样"
@@ -43,6 +43,10 @@ admin_users = ["111111111"]
 [advanced]
 # MaiBot 模型任务名，不是供应商名、URL 或具体模型名。
 model_task = "utils"
+# 全量话题扫描：建议只配置快速、低成本模型。
+topic_scan_task = "daily_topic_scan"
+# 主要事件精炼：建议强模型优先、快速模型兜底。
+event_refine_task = "daily_event_refine"
 inject_memory = false
 llm_timeout_seconds = 60
 render_timeout_seconds = 25

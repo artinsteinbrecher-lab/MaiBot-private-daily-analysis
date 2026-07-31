@@ -72,7 +72,7 @@ class PluginSection(PluginConfigBase):
         json_schema_extra={"label": "启用插件"},
     )
     config_version: str = Field(
-        default="3.3.1",
+        default="3.4.0",
         description="配置文件版本，用于兼容性校验，请勿手动修改",
         json_schema_extra={"label": "配置版本", "disabled": True},
     )
@@ -271,6 +271,16 @@ class AdvancedSection(PluginConfigBase):
         description="单个群完成消息读取、事件提取和图片渲染的整体超时时间",
         json_schema_extra={"label": "单群整体超时（秒）", "hint": "完整覆盖推荐 900"},
     )
+    topic_scan_task: str = Field(
+        default="daily_topic_scan",
+        description="全量轻量话题扫描使用的 MaiBot 模型任务；建议只放快速低成本模型",
+        json_schema_extra={"label": "话题扫描任务", "hint": "推荐 daily_topic_scan"},
+    )
+    event_refine_task: str = Field(
+        default="daily_event_refine",
+        description="最多12个主要事件详细精炼使用的 MaiBot 模型任务；可配置强模型和快速兜底",
+        json_schema_extra={"label": "主要事件精炼任务", "hint": "推荐 daily_event_refine"},
+    )
     event_chunk_messages: int = Field(
         default=120,
         description="每个事件提取分段最多包含的消息数；较小分段更容易在宿主30秒RPC限制内返回",
@@ -325,30 +335,35 @@ class DailyAnalysisPlugin(MaiBotPlugin):
 
     async def on_load(self) -> None:
         adv = self.config.advanced
-        model_task = await self._validated_model_task()
+        model_task = await self._validated_model_task(adv.model_task, "通用/个人总结")
+        topic_task = await self._validated_model_task(adv.topic_scan_task, "话题扫描")
+        refine_task = await self._validated_model_task(adv.event_refine_task, "主要事件精炼")
         self._service = AnalysisService(
             self.ctx,
             model_task,
+            topic_task,
+            refine_task,
             adv.llm_timeout_seconds,
             self.config.auto_summary.timezone,
         )
         self._renderer = SummaryRenderer(self.ctx, self._render_timeout_ms())
         self._start_scheduler()
         self.ctx.logger.info(
-            f"私聊群事件日报插件已加载（模型任务: {model_task}，LLM超时: {adv.llm_timeout_seconds}s，"
+            f"私聊群事件日报插件已加载（通用: {model_task}，话题扫描: {topic_task}，"
+            f"事件精炼: {refine_task}，LLM超时: {adv.llm_timeout_seconds}s，"
             f"渲染超时: {adv.render_timeout_seconds}s）"
         )
 
     def _render_timeout_ms(self) -> int:
         return max(5, int(self.config.advanced.render_timeout_seconds or 25)) * 1000
 
-    async def _validated_model_task(self) -> str:
+    async def _validated_model_task(self, configured: str = "", label: str = "模型") -> str:
         """校验配置的模型任务名是否为宿主可用任务；非法（如误填模型名）则回退 utils 并告警。
 
         ctx.llm.generate(model=...) 只接受【任务名】(resolve_task_name 对未知名抛 ValueError)，
         因此这里在加载/热更新时主动校验，避免误填导致每次分析静默失败。
         """
-        want = (self.config.advanced.model_task or "utils").strip() or "utils"
+        want = (configured or "utils").strip() or "utils"
         try:
             res = await self.ctx.llm.get_available_models()
             models = res.get("models") if isinstance(res, dict) else res
@@ -357,7 +372,7 @@ class DailyAnalysisPlugin(MaiBotPlugin):
                     return want
                 fallback = "utils" if "utils" in models else str(models[0])
                 self.ctx.logger.warning(
-                    f"配置的模型任务 '{want}' 不在可用任务列表 {models} 中"
+                    f"{label}任务 '{want}' 不在可用任务列表 {models} 中"
                     f"（只能填任务名、不能填模型名），已回退到 '{fallback}'"
                 )
                 return fallback
@@ -402,7 +417,15 @@ class DailyAnalysisPlugin(MaiBotPlugin):
             return
         # 同步分析模型任务与超时设置
         if self._service is not None:
-            self._service.model = await self._validated_model_task()
+            self._service.model = await self._validated_model_task(
+                self.config.advanced.model_task, "通用/个人总结"
+            )
+            self._service.topic_model = await self._validated_model_task(
+                self.config.advanced.topic_scan_task, "话题扫描"
+            )
+            self._service.refine_model = await self._validated_model_task(
+                self.config.advanced.event_refine_task, "主要事件精炼"
+            )
             self._service.call_timeout_s = max(5, int(self.config.advanced.llm_timeout_seconds or 60))
             self._service.timezone_name = (
                 self.config.auto_summary.timezone or "Asia/Shanghai"

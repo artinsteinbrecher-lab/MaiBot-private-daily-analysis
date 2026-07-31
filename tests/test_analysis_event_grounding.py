@@ -314,6 +314,49 @@ class EventGroundingTests(unittest.TestCase):
         self.assertEqual(event["outcomes"], ["已经确认"])
         self.assertEqual(report["refinement"]["refined"], 1)
 
+    def test_topic_and_refine_calls_use_separate_model_tasks(self):
+        self.service.topic_model = "daily_topic_scan"
+        self.service.refine_model = "daily_event_refine"
+        calls = []
+
+        class LLM:
+            async def generate(self, prompt, **kwargs):
+                calls.append(kwargs.get("model"))
+                if kwargs.get("model") == "daily_topic_scan":
+                    return {"success": True, "response": '{"events":[]}'}
+                return {
+                    "success": True,
+                    "response": '{"events":[{"candidate_id":"E1",'
+                    '"importance":"major","start_time":"08:00",'
+                    '"end_time":"08:00","title":"事件",'
+                    '"summary":"详细经过","outcomes":[],"pending":[],'
+                    '"participants":["群友"],"anchors":[],"links":[]}]}',
+                }
+
+        self.service.ctx.llm = LLM()
+        messages = self._bulk_messages(5)
+        asyncio.run(
+            self.service._extract_event_chunk(
+                messages,
+                max_anchors=1,
+                include_links=True,
+                detail_level="standard",
+                chunk_label="1",
+                chunk_count=1,
+            )
+        )
+        candidate = self._fake_chunk_report(messages, importance="major")["events"][0]
+        asyncio.run(
+            self.service._refine_major_batch(
+                [candidate],
+                messages,
+                max_anchors=1,
+                include_links=True,
+                detail_level="full",
+            )
+        )
+        self.assertEqual(calls, ["daily_topic_scan", "daily_event_refine"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -61,7 +61,7 @@ fonts/
 ```toml
 [plugin]
 enabled = true
-config_version = "3.3.1"
+config_version = "3.4.0"
 
 [summary]
 coverage_mode = "完整覆盖"
@@ -100,6 +100,8 @@ admin_users = ["111111111"]
 [advanced]
 # 这是 MaiBot 模型任务名，不是模型名、URL 或供应商名。
 model_task = "utils"
+topic_scan_task = "daily_topic_scan"
+event_refine_task = "daily_event_refine"
 inject_memory = false
 llm_timeout_seconds = 60
 render_timeout_seconds = 25
@@ -116,7 +118,10 @@ split_chunk_on_failure = true
 - `recipient_user` 必须同时存在于 `command_permission.admin_users`。
 - 未配置有效自动接收人时，自动任务不会读取群消息，也不会调用模型。
 - 多个管理员共用来源群白名单，但每次手动请求的进度与结果只发给发起账号。
-- `advanced.model_task` 必须是 MaiBot 中已存在的任务，例如 `utils`。
+- `advanced.model_task` 用于兼容个人总结和其他通用分析。
+- `advanced.topic_scan_task` 用于大量轻量扫描，应配置快速、低成本模型。
+- `advanced.event_refine_task` 只精炼最多 12 个主要事件，可配置高质量模型和快速兜底。
+- 三个字段都必须是 MaiBot 中存在的任务名，不是具体模型名。
 - 没加入的群没有可用群聊流，会被标为空或不可用，不会阻塞其他群。
 
 ### 模型来源
@@ -124,7 +129,9 @@ split_chunk_on_failure = true
 插件沿用 MaiBot 当前模型分配，不新增模型配置：
 
 ```text
-日报插件 → advanced.model_task（默认 utils）→ MaiBot 任务中的模型列表
+话题扫描 → daily_topic_scan → 快速模型池
+主要事件精炼 → daily_event_refine → 高质量模型池
+个人总结/兼容分析 → utils → 原有模型池
 ```
 
 因此升级插件不会修改模型列表、模型供应商、URL、Key、温度或路由策略。

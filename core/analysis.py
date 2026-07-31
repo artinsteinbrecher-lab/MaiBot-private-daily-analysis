@@ -83,6 +83,8 @@ class AnalysisService:
         self,
         ctx: Any,
         model: str = _DEFAULT_MODEL_TASK,
+        topic_model: str = "",
+        refine_model: str = "",
         call_timeout_s: int = _DEFAULT_CALL_TIMEOUT_S,
         timezone_name: str = "Asia/Shanghai",
     ):
@@ -90,6 +92,8 @@ class AnalysisService:
         self.logger = ctx.logger
         # 模型任务名（可由插件配置覆盖）。默认 utils=快速模型，确保 30 秒内返回
         self.model = model or _DEFAULT_MODEL_TASK
+        self.topic_model = topic_model or self.model
+        self.refine_model = refine_model or self.topic_model
         # 单次 LLM 调用的客户端等待上限（秒），可由插件配置覆盖
         self.call_timeout_s = max(5, int(call_timeout_s or _DEFAULT_CALL_TIMEOUT_S))
         self.timezone_name = timezone_name or "Asia/Shanghai"
@@ -108,6 +112,7 @@ class AnalysisService:
         request_type: str,
         max_tokens: int = _JSON_MAX_TOKENS,
         temperature: float = 0.7,
+        model_task: str = "",
     ) -> Optional[str]:
         """调用宿主 LLM 能力，成功返回文本，失败返回 None"""
         try:
@@ -115,7 +120,7 @@ class AnalysisService:
                 result = await asyncio.wait_for(
                     self.ctx.llm.generate(
                         prompt,
-                        model=self.model,
+                        model=model_task or self.model,
                         temperature=temperature,
                         max_tokens=max_tokens,
                     ),
@@ -573,6 +578,7 @@ class AnalysisService:
             request_type="plugin.daily_event.extract",
             max_tokens=_EVENT_JSON_MAX_TOKENS,
             temperature=0.2,
+            model_task=self.topic_model,
         )
         if not result:
             return None
@@ -755,6 +761,7 @@ class AnalysisService:
             request_type="plugin.daily_event.refine",
             max_tokens=_EVENT_JSON_MAX_TOKENS,
             temperature=0.2,
+            model_task=self.refine_model,
         )
         parsed = self._parse_llm_json_object(result or "")
         raw_events = parsed.get("events") if isinstance(parsed, dict) else []
