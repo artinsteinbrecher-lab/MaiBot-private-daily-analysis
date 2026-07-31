@@ -18,7 +18,7 @@ from .core import AnalysisService, SummaryRenderer
 from .core.event_digest import (
     build_daily_index_text,
     build_event_plain_text,
-    build_minor_topic_timeline_text,
+    build_minor_topic_timeline_pages,
     parse_summary_command,
     split_message_text,
 )
@@ -72,7 +72,7 @@ class PluginSection(PluginConfigBase):
         json_schema_extra={"label": "启用插件"},
     )
     config_version: str = Field(
-        default="3.3.0",
+        default="3.3.1",
         description="配置文件版本，用于兼容性校验，请勿手动修改",
         json_schema_extra={"label": "配置版本", "disabled": True},
     )
@@ -952,6 +952,7 @@ class DailyAnalysisPlugin(MaiBotPlugin):
                 # 没有事件不是图片渲染失败。
                 continue
             sent_all = True
+            image_delivery_uncertain = False
             if major_count:
                 images = await self._renderer.generate_event_report_images(
                     group_name=item["group_name"],
@@ -965,33 +966,60 @@ class DailyAnalysisPlugin(MaiBotPlugin):
                     ),
                 )
                 if not images:
-                    item["status"] = "failed"
-                    item["error"] = "主要事件图片渲染失败"
+                    image_delivery_uncertain = True
+                    item["error"] = "主要事件图片渲染失败，已发送文字版"
+                else:
+                    for image_base64 in images:
+                        try:
+                            image_result = await self.ctx.send.image(
+                                image_base64,
+                                destination_stream_id,
+                            )
+                            if image_result is False or image_result is None:
+                                image_delivery_uncertain = True
+                        except Exception as exc:
+                            image_delivery_uncertain = True
+                            self.ctx.logger.warning(
+                                f"群 {item['group_id']} 主要事件图片发送异常，"
+                                f"将使用文字降级: {exc}"
+                            )
+
+                if image_delivery_uncertain:
+                    major_events = [
+                        event
+                        for event in events
+                        if event.get("importance") != "minor"
+                    ]
+                    major_report = {**report, "events": major_events}
                     await self.ctx.send.text(
-                        f"{item['group_name']}（{item['group_id']}）"
-                        "主要事件图片渲染失败",
+                        f"{item['group_name']}（{item['group_id']}）部分主要事件图片"
+                        "发送状态异常，以下补发可搜索文字版。",
                         destination_stream_id,
                     )
-                    continue
-                for image_base64 in images:
-                    sent_all = bool(
-                        await self.ctx.send.image(
-                            image_base64, destination_stream_id
-                        )
-                    ) and sent_all
+                    await self._send_text_chunks(
+                        build_event_plain_text(
+                            item["group_name"],
+                            item["group_id"],
+                            report_date,
+                            period_text,
+                            major_report,
+                        ),
+                        destination_stream_id,
+                    )
+                    if item.get("status") == "ok":
+                        item["status"] = "partial"
+                    item["error"] = "主要事件图片发送状态异常，已补发文字版"
+                    sent_all = True
 
             if minor_count:
-                topic_text = build_minor_topic_timeline_text(
+                topic_pages = build_minor_topic_timeline_pages(
                     item["group_name"],
                     item["group_id"],
                     report_date,
                     events,
                 )
-                if topic_text:
-                    await self._send_text_chunks(
-                        topic_text,
-                        destination_stream_id,
-                    )
+                for topic_page in topic_pages:
+                    await self.ctx.send.text(topic_page, destination_stream_id)
             if sent_all:
                 delivered_groups += 1
                 if self.config.advanced.inject_memory:

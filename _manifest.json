@@ -1,7 +1,7 @@
 {
   "manifest_version": 2,
   "id": "khiqwq.daily_analysis",
-  "version": "3.3.0",
+  "version": "3.3.1",
   "plugin_type": "tool",
   "name": "私聊群事件日报",
   "description": "按白名单完整或抽样读取 QQ 群聊天记录，先生成轻量话题时间线，再精炼主要事件，并仅发送给指定管理员私聊。支持分段重试、主要事件详情、普通话题时间戳和次日定时日报。",

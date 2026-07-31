@@ -340,5 +340,93 @@ class PluginRoutingTests(unittest.TestCase):
         self.assertIn("09:00—09:15｜讨论部署方式", sent_text)
 
 
+    def test_image_send_failure_falls_back_to_major_text(self):
+        plugin = self._plugin()
+        plugin.config.auto_summary.min_messages = 1
+        plugin.config.summary = SimpleNamespace(events_per_page=4)
+        plugin.config.advanced = SimpleNamespace(
+            group_timeout_seconds=60,
+            inject_memory=False,
+        )
+
+        async def analyze(meta, *args):
+            return {
+                **meta,
+                "status": "ok",
+                "message_count": 30,
+                "report": {
+                    "overview": "主要事件概览",
+                    "events": [
+                        {
+                            "importance": "major",
+                            "start_time": "10:00",
+                            "end_time": "10:30",
+                            "title": "处理接口故障",
+                            "summary": "群友排查并恢复了接口。",
+                            "outcomes": ["接口恢复"],
+                            "pending": [],
+                            "participants": ["群友"],
+                            "anchors": [
+                                {
+                                    "time": "10:20",
+                                    "speaker": "群友",
+                                    "quote": "现在恢复了",
+                                }
+                            ],
+                            "links": [],
+                        }
+                    ],
+                    "coverage": {
+                        "total_messages": 30,
+                        "analyzed_messages": 30,
+                        "coverage_percent": 100.0,
+                    },
+                    "refinement": {
+                        "requested": 1,
+                        "refined": 1,
+                        "fallback": 0,
+                    },
+                },
+            }
+
+        class Renderer:
+            async def generate_event_report_images(self, **kwargs):
+                return ["image-base64"]
+
+        async def uncertain_image(image, stream_id):
+            plugin.ctx.send.calls.append(("image", stream_id, image))
+            return False
+
+        plugin._analyze_event_group = analyze
+        plugin._renderer = Renderer()
+        plugin.ctx.send.image = uncertain_image
+        results = asyncio.run(
+            DailyAnalysisPlugin._deliver_event_reports(
+                plugin,
+                "private-stream",
+                [
+                    {
+                        "group_id": "20001",
+                        "group_name": "来源群",
+                        "stream_id": "source-stream",
+                    }
+                ],
+                start_ts=0,
+                end_ts=1,
+                report_date=datetime(2026, 7, 31),
+                period_text="2026-07-31 00:00—2026-07-31 23:59",
+                request_label="测试日报",
+            )
+        )
+        self.assertEqual(results[0]["status"], "partial")
+        sent_text = "\n".join(
+            call[2] for call in plugin.ctx.send.calls if call[0] == "text"
+        )
+        self.assertIn("补发可搜索文字版", sent_text)
+        self.assertIn("处理接口故障", sent_text)
+        self.assertIn("部分完成 1 个", sent_text)
+        self.assertIn("失败 0 个", sent_text)
+
+
 if __name__ == "__main__":
     unittest.main()

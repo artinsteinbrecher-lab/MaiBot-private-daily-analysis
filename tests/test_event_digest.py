@@ -13,6 +13,7 @@ _SPEC.loader.exec_module(event_digest)
 build_daily_index_text = event_digest.build_daily_index_text
 build_event_plain_text = event_digest.build_event_plain_text
 build_minor_topic_timeline_text = event_digest.build_minor_topic_timeline_text
+build_minor_topic_timeline_pages = event_digest.build_minor_topic_timeline_pages
 merge_adjacent_event_candidates = event_digest.merge_adjacent_event_candidates
 merge_event_reports_fallback = event_digest.merge_event_reports_fallback
 normalize_event_report = event_digest.normalize_event_report
@@ -273,6 +274,32 @@ class TextOutputTests(unittest.TestCase):
         self.assertIn("【08:00—08:59】", text)
         self.assertIn("【09:00—09:59】", text)
         self.assertIn("普通话题20", text)
+
+
+    def test_minor_topic_pages_repeat_identity_and_page_numbers(self):
+        events = [
+            {
+                "importance": "minor",
+                "start_time": f"09:{index:02d}",
+                "end_time": f"09:{index + 1:02d}",
+                "title": f"话题{index}",
+                "summary": "这是用于测试分页的一句话概括。",
+                "links": [],
+            }
+            for index in range(20)
+        ]
+        pages = build_minor_topic_timeline_pages(
+            "测试群",
+            "123456789",
+            datetime(2026, 7, 31),
+            events,
+            limit=260,
+        )
+        self.assertGreater(len(pages), 1)
+        self.assertTrue(all(len(page) <= 260 for page in pages))
+        for index, page in enumerate(pages, start=1):
+            self.assertIn(f"其他话题时间线 {index}/{len(pages)}", page)
+            self.assertIn("测试群（123456789）", page)
 
 
 if __name__ == "__main__":

@@ -508,6 +508,36 @@ def build_minor_topic_timeline_text(
     return "\n".join(lines).strip()
 
 
+def build_minor_topic_timeline_pages(
+    group_name: str,
+    group_id: str,
+    report_date: datetime,
+    events: Iterable[Dict[str, Any]],
+    *,
+    limit: int = 1450,
+) -> List[str]:
+    """生成带页码和重复群名的普通话题私聊分页。"""
+
+    timeline = build_minor_topic_timeline_text(
+        group_name,
+        group_id,
+        report_date,
+        events,
+    )
+    if not timeline:
+        return []
+    lines = timeline.splitlines()
+    body = "\n".join(lines[2:]).strip() if len(lines) > 2 else timeline
+    reserved = min(180, max(80, len(group_name) + len(group_id) + 60))
+    chunks = split_message_text(body, limit=max(120, limit - reserved))
+    page_count = len(chunks)
+    return [
+        f"【{group_name}（{group_id}）其他话题时间线 {index}/{page_count}】\n"
+        f"日期：{report_date:%Y-%m-%d}\n{chunk}"
+        for index, chunk in enumerate(chunks, start=1)
+    ]
+
+
 def build_daily_index_text(
     report_date: datetime,
     period_text: str,
