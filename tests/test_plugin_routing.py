@@ -105,7 +105,7 @@ class PluginRoutingTests(unittest.TestCase):
         groups=None,
     ):
         plugin = object.__new__(DailyAnalysisPlugin)
-        plugin.ctx = SimpleNamespace(logger=_Logger(), send=_Send())
+        plugin.ctx = SimpleNamespace(logger=_Logger(), send=_Send(), llm=None)
         plugin.config = SimpleNamespace(
             plugin=SimpleNamespace(enabled=True),
             auto_summary=SimpleNamespace(
@@ -113,8 +113,186 @@ class PluginRoutingTests(unittest.TestCase):
                 target_chats=groups or [],
             ),
             command_permission=SimpleNamespace(admin_users=admins or []),
+            advanced=SimpleNamespace(model_task="legacy-task"),
         )
         return plugin
+
+    def test_fixed_plugin_tasks_are_used_when_available(self):
+        plugin = self._plugin()
+
+        class LLM:
+            async def get_available_models(self):
+                return [
+                    "replyer",
+                    "plugin_daily_extract",
+                    "plugin_daily_compose",
+                    "plugin_daily_verify",
+                    "plugin_user_profile",
+                ]
+
+        plugin.ctx.llm = LLM()
+        routes = asyncio.run(DailyAnalysisPlugin._resolve_plugin_tasks(plugin))
+        self.assertEqual(
+            routes,
+            {
+                "main": "replyer",
+                "extract": "plugin_daily_extract",
+                "compose": "plugin_daily_compose",
+                "verify": "plugin_daily_verify",
+                "user_profile": "plugin_user_profile",
+            },
+        )
+
+    def test_missing_plugin_tasks_follow_replyer(self):
+        plugin = self._plugin()
+
+        class LLM:
+            async def get_available_models(self):
+                return ["utils", "replyer"]
+
+        plugin.ctx.llm = LLM()
+        routes = asyncio.run(DailyAnalysisPlugin._resolve_plugin_tasks(plugin))
+        self.assertEqual(set(routes.values()), {"replyer"})
+
+    def test_missing_replyer_does_not_select_utils_as_a_substitute(self):
+        plugin = self._plugin()
+
+        class LLM:
+            async def get_available_models(self):
+                return ["utils"]
+
+        plugin.ctx.llm = LLM()
+        routes = asyncio.run(DailyAnalysisPlugin._resolve_plugin_tasks(plugin))
+        self.assertEqual(set(routes.values()), {"replyer"})
+
+    def test_missing_main_task_does_not_select_first_available_task(self):
+        plugin = self._plugin()
+
+        class LLM:
+            async def get_available_models(self):
+                return ["custom-main", "backup"]
+
+        plugin.ctx.llm = LLM()
+        routes = asyncio.run(DailyAnalysisPlugin._resolve_plugin_tasks(plugin))
+        self.assertEqual(set(routes.values()), {"replyer"})
+
+    def test_empty_task_list_follows_replyer(self):
+        plugin = self._plugin()
+        plugin.ctx.llm = SimpleNamespace(get_available_models=lambda: asyncio.sleep(0, result=[]))
+        routes = asyncio.run(DailyAnalysisPlugin._resolve_plugin_tasks(plugin))
+        self.assertEqual(set(routes.values()), {"replyer"})
+
+    def test_legacy_rpc_wrapper_is_supported(self):
+        plugin = self._plugin()
+        plugin.ctx.llm = SimpleNamespace(
+            get_available_models=lambda: asyncio.sleep(
+                0,
+                result={
+                    "models": [
+                        "replyer",
+                        "plugin_daily_extract",
+                        "plugin_user_profile",
+                    ]
+                },
+            ),
+        )
+        routes = asyncio.run(DailyAnalysisPlugin._resolve_plugin_tasks(plugin))
+        self.assertEqual(routes["extract"], "plugin_daily_extract")
+        self.assertEqual(routes["compose"], "replyer")
+        self.assertEqual(routes["verify"], "replyer")
+        self.assertEqual(routes["user_profile"], "plugin_user_profile")
+
+    def test_non_sdk_metadata_is_not_treated_as_registered_tasks(self):
+        plugin = self._plugin()
+
+        class LLM:
+            async def get_available_models(self):
+                return {
+                    "models": [
+                        {"task": "plugin_daily_extract"},
+                        {"name": "plugin_daily_compose"},
+                    ]
+                }
+
+        plugin.ctx.llm = LLM()
+        routes = asyncio.run(DailyAnalysisPlugin._resolve_plugin_tasks(plugin))
+        self.assertEqual(set(routes.values()), {"replyer"})
+
+    def test_task_lookup_failure_safely_follows_replyer(self):
+        plugin = self._plugin()
+
+        class LLM:
+            async def get_available_models(self):
+                raise RuntimeError("unavailable")
+
+        plugin.ctx.llm = LLM()
+        routes = asyncio.run(DailyAnalysisPlugin._resolve_plugin_tasks(plugin))
+        self.assertEqual(set(routes.values()), {"replyer"})
+
+    def test_legacy_model_fields_are_removed_from_webui_schema(self):
+        base = plugin_module.MaiBotPlugin
+        original = getattr(base, "get_webui_config_schema", None)
+        base.get_webui_config_schema = lambda self, **kwargs: {
+            "properties": {
+                "advanced": {
+                    "properties": {
+                        "model_task": {},
+                        "topic_scan_task": {},
+                        "event_refine_task": {},
+                        "llm_timeout_seconds": {},
+                    }
+                }
+            },
+            "sections": {},
+        }
+        try:
+            plugin = self._plugin()
+            schema = DailyAnalysisPlugin.get_webui_config_schema(plugin)
+        finally:
+            if original is None:
+                delattr(base, "get_webui_config_schema")
+            else:
+                base.get_webui_config_schema = original
+        advanced = schema["properties"]["advanced"]["properties"]
+        self.assertNotIn("model_task", advanced)
+        self.assertNotIn("topic_scan_task", advanced)
+        self.assertNotIn("event_refine_task", advanced)
+        self.assertIn("llm_timeout_seconds", advanced)
+
+    def test_user_summary_only_runs_fact_portrait(self):
+        plugin = self._plugin()
+        calls = []
+
+        class Service:
+            def analyze_single_user_stats(self, messages):
+                return {"message_count": 2, "char_count": 12, "emoji_count": 0}
+
+            async def analyze_single_user_portrait(self, messages, user_name, user_id):
+                calls.append((user_name, user_id))
+                return {"summary": "事实型概览", "evidence_points": []}
+
+        class Renderer:
+            async def generate_user_summary_image(self, **kwargs):
+                calls.append(kwargs)
+                return "image-base64"
+
+        plugin._service = Service()
+        plugin._renderer = Renderer()
+        image, summary = asyncio.run(
+            DailyAnalysisPlugin._build_user_summary_image(
+                plugin,
+                [{"processed_plain_text": "测试"}],
+                "小明",
+                "10001",
+                datetime(2026, 8, 2),
+            )
+        )
+        self.assertEqual(image, "image-base64")
+        self.assertEqual(summary, "事实型概览")
+        self.assertEqual(calls[0], ("小明", "10001"))
+        self.assertNotIn("depression_data", calls[1])
+        self.assertNotIn("golden_quotes", calls[1])
+        self.assertNotIn("display_order", calls[1])
 
     def test_group_summary_command_never_sends_to_group(self):
         plugin = self._plugin(admins=["10001"], groups=["20001"])

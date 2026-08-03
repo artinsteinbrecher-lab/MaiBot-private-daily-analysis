@@ -24,39 +24,15 @@ from .core.event_digest import (
 )
 
 
-# ==================== 模块选项（WebUI 中文下拉）====================
-
-# 个人总结可选模块；额外提供"并排"组合项以保留横向并排能力
-PersonalModuleOption = Literal[
-    "无", "3H活跃轨迹", "群友画像", "炫压抑评级", "语出惊人", "群友画像+炫压抑评级(并排)"
-]
-
-_PERSONAL_MODULE_MAP = {
-    "3H活跃轨迹": "3H",
-    "群友画像": "Portraits",
-    "炫压抑评级": "Rankings",
-    "语出惊人": "Quotes",
-    "群友画像+炫压抑评级(并排)": "Portraits,Rankings",
-}
-
-def _slots_to_display_order(slots, mapping: dict) -> List[str]:
-    """把若干下拉槽位（中文模块名，"无"表示不显示）按顺序转成渲染器用的代码列表，按模块去重。
-
-    组合项（如 "Portraits,Rankings"）按其成员逐个去重：若某成员已在前面出现过，则跳过该槽位，
-    避免同一模块在"独立"和"并排"中重复渲染。
-    """
-    order: List[str] = []
-    seen = set()
-    for slot in slots:
-        code = mapping.get(slot)
-        if not code:
-            continue
-        members = code.split(",")
-        if any(member in seen for member in members):
-            continue
-        seen.update(members)
-        order.append(code)
-    return order
+# 插件只引用宿主实际存在的 MaiBot 高级模型任务，不在插件配置页重复配置
+# 供应商或模型 ID。官方 SDK 暂不支持插件动态注册全局任务；未安装配套的
+# MaiBot 兼容补丁时，这四个任务不会出现在模型分配页，插件会统一跟随 replyer。
+_PLUGIN_EXTRACT_TASK = "plugin_daily_extract"
+_PLUGIN_COMPOSE_TASK = "plugin_daily_compose"
+_PLUGIN_VERIFY_TASK = "plugin_daily_verify"
+_PLUGIN_USER_PROFILE_TASK = "plugin_user_profile"
+_MAIN_MODEL_TASK = "replyer"
+_LEGACY_MODEL_FIELDS = {"model_task", "topic_scan_task", "event_refine_task"}
 
 
 # ==================== 配置模型 ====================
@@ -72,7 +48,7 @@ class PluginSection(PluginConfigBase):
         json_schema_extra={"label": "启用插件"},
     )
     config_version: str = Field(
-        default="3.4.0",
+        default="3.6.0",
         description="配置文件版本，用于兼容性校验，请勿手动修改",
         json_schema_extra={"label": "配置版本", "disabled": True},
     )
@@ -83,7 +59,7 @@ class SummarySection(PluginConfigBase):
     __ui_icon__ = "file-text"
     __ui_order__ = 1
     coverage_mode: Literal["均衡抽样", "完整覆盖"] = Field(
-        default="均衡抽样",
+        default="完整覆盖",
         description="均衡抽样适合低成本快速日报；完整覆盖会分段分析统计范围内的全部有效文本消息",
         json_schema_extra={
             "label": "消息覆盖模式",
@@ -91,7 +67,7 @@ class SummarySection(PluginConfigBase):
         },
     )
     detail_level: Literal["精简", "标准", "完整"] = Field(
-        default="标准",
+        default="完整",
         description="控制哪些聊天内容会被记录为事件；完整模式会保留较小但有实际内容的动态",
         json_schema_extra={"label": "日报详细程度"},
     )
@@ -162,27 +138,6 @@ class UserSummarySection(PluginConfigBase):
             "hint": "为空时所有人都能查看他人；白名单=仅名单内可看他人；黑名单=名单内禁止看他人",
         },
     )
-    # 4 个下拉槽位，按槽位顺序显示；选"无"隐藏；含"并排"组合项
-    slot_1: PersonalModuleOption = Field(
-        default="3H活跃轨迹",
-        description="第 1 个显示的模块（选『无』则此位置不显示）",
-        json_schema_extra={"label": "显示模块 1"},
-    )
-    slot_2: PersonalModuleOption = Field(
-        default="群友画像+炫压抑评级(并排)",
-        description="第 2 个显示的模块（『…并排』表示两个模块横向并排）",
-        json_schema_extra={"label": "显示模块 2"},
-    )
-    slot_3: PersonalModuleOption = Field(
-        default="语出惊人",
-        description="第 3 个显示的模块",
-        json_schema_extra={"label": "显示模块 3"},
-    )
-    slot_4: PersonalModuleOption = Field(
-        default="无",
-        description="第 4 个显示的模块",
-        json_schema_extra={"label": "显示模块 4"},
-    )
 
 
 class AutoSummarySection(PluginConfigBase):
@@ -238,12 +193,11 @@ class AdvancedSection(PluginConfigBase):
     __ui_order__ = 5
     model_task: str = Field(
         default="utils",
-        description="生成总结/分析使用的【模型任务名】。该任务内配置的模型会按其 model_list 随机/轮询使用。"
-        "建议 utils 或 planner（通常是快速非思考模型）；replyer 是主回复模型，可能较慢、需配合调大 LLM 超时。",
+        description="旧版兼容字段；新版由 MaiBot 高级任务统一分配。",
         json_schema_extra={
-            "label": "模型任务",
-            "hint": "填 MaiBot 的【任务名】(如 utils / planner / replyer / memory)，不是模型名；"
-            "想指定具体模型请在 MaiBot 的 model_config.toml 改该任务的 model_list。填错会自动回退 utils。",
+            "label": "旧版模型任务",
+            "hidden": True,
+            "deprecated": True,
         },
     )
     inject_memory: bool = Field(
@@ -273,13 +227,13 @@ class AdvancedSection(PluginConfigBase):
     )
     topic_scan_task: str = Field(
         default="daily_topic_scan",
-        description="全量轻量话题扫描使用的 MaiBot 模型任务；建议只放快速低成本模型",
-        json_schema_extra={"label": "话题扫描任务", "hint": "推荐 daily_topic_scan"},
+        description="旧版兼容字段；新版固定使用 plugin_daily_extract。",
+        json_schema_extra={"label": "旧版话题扫描任务", "hidden": True, "deprecated": True},
     )
     event_refine_task: str = Field(
         default="daily_event_refine",
-        description="最多12个主要事件详细精炼使用的 MaiBot 模型任务；可配置强模型和快速兜底",
-        json_schema_extra={"label": "主要事件精炼任务", "hint": "推荐 daily_event_refine"},
+        description="旧版兼容字段；新版固定使用 plugin_daily_compose。",
+        json_schema_extra={"label": "旧版事件精炼任务", "hidden": True, "deprecated": True},
     )
     event_chunk_messages: int = Field(
         default=120,
@@ -335,50 +289,68 @@ class DailyAnalysisPlugin(MaiBotPlugin):
 
     async def on_load(self) -> None:
         adv = self.config.advanced
-        model_task = await self._validated_model_task(adv.model_task, "通用/个人总结")
-        topic_task = await self._validated_model_task(adv.topic_scan_task, "话题扫描")
-        refine_task = await self._validated_model_task(adv.event_refine_task, "主要事件精炼")
+        routes = await self._resolve_plugin_tasks()
         self._service = AnalysisService(
             self.ctx,
-            model_task,
-            topic_task,
-            refine_task,
-            adv.llm_timeout_seconds,
-            self.config.auto_summary.timezone,
+            model=routes["main"],
+            topic_model=routes["extract"],
+            refine_model=routes["compose"],
+            verify_model=routes["verify"],
+            user_profile_model=routes["user_profile"],
+            call_timeout_s=adv.llm_timeout_seconds,
+            timezone_name=self.config.auto_summary.timezone,
         )
         self._renderer = SummaryRenderer(self.ctx, self._render_timeout_ms())
         self._start_scheduler()
         self.ctx.logger.info(
-            f"私聊群事件日报插件已加载（通用: {model_task}，话题扫描: {topic_task}，"
-            f"事件精炼: {refine_task}，LLM超时: {adv.llm_timeout_seconds}s，"
+            "私聊群事件日报插件已加载（"
+            f"事实提取: {routes['extract']}，事件编排: {routes['compose']}，"
+            f"事实复核: {routes['verify']}，个人画像: {routes['user_profile']}，"
+            f"LLM超时: {adv.llm_timeout_seconds}s，"
             f"渲染超时: {adv.render_timeout_seconds}s）"
         )
 
     def _render_timeout_ms(self) -> int:
         return max(5, int(self.config.advanced.render_timeout_seconds or 25)) * 1000
 
-    async def _validated_model_task(self, configured: str = "", label: str = "模型") -> str:
-        """校验配置的模型任务名是否为宿主可用任务；非法（如误填模型名）则回退 utils 并告警。
-
-        ctx.llm.generate(model=...) 只接受【任务名】(resolve_task_name 对未知名抛 ValueError)，
-        因此这里在加载/热更新时主动校验，避免误填导致每次分析静默失败。
-        """
-        want = (configured or "utils").strip() or "utils"
+    async def _resolve_plugin_tasks(self) -> Dict[str, str]:
+        """解析宿主实际存在的插件专用任务；缺失时跟随 ``replyer``。"""
+        requested = {
+            "extract": (_PLUGIN_EXTRACT_TASK, "extract"),
+            "compose": (_PLUGIN_COMPOSE_TASK, "compose"),
+            "verify": (_PLUGIN_VERIFY_TASK, "verify"),
+            "user_profile": (_PLUGIN_USER_PROFILE_TASK, "user_profile"),
+        }
+        routes: Dict[str, str] = {"main": _MAIN_MODEL_TASK}
         try:
-            res = await self.ctx.llm.get_available_models()
-            models = res.get("models") if isinstance(res, dict) else res
-            if isinstance(models, list) and models:
-                if want in models:
-                    return want
-                fallback = "utils" if "utils" in models else str(models[0])
-                self.ctx.logger.warning(
-                    f"{label}任务 '{want}' 不在可用任务列表 {models} 中"
-                    f"（只能填任务名、不能填模型名），已回退到 '{fallback}'"
-                )
-                return fallback
-        except Exception as e:
-            self.ctx.logger.warning(f"校验模型任务可用性失败，按配置值 '{want}' 使用: {e}")
-        return want
+            result = await self.ctx.llm.get_available_models()
+            models: Any = result
+            # maibot_sdk 2.7.1 返回 list[str]；保留对旧 RPC 包装
+            # {"models": list[str]} 的兼容，其他结构不推断为任务配置。
+            if isinstance(result, dict):
+                models = result.get("models", [])
+            available = (
+                {
+                    task_name.strip()
+                    for task_name in models
+                    if isinstance(task_name, str) and task_name.strip()
+                }
+                if isinstance(models, (list, tuple, set))
+                else set()
+            )
+            for key, (task_name, label) in requested.items():
+                routes[key] = task_name if task_name in available else routes["main"]
+                if routes[key] != task_name:
+                    self.ctx.logger.warning(
+                        f"MaiBot task '{task_name}' is not registered; {label} follows 'replyer'. "
+                        "Install the optional MaiBot task patch to configure it independently."
+                    )
+            return routes
+        except Exception as exc:
+            self.ctx.logger.warning(
+                f"model task lookup failed; all plugin tasks safely follow 'replyer': {exc}"
+            )
+        return {"main": _MAIN_MODEL_TASK, **{key: _MAIN_MODEL_TASK for key in requested}}
 
     async def on_unload(self) -> None:
         await self._stop_scheduler()
@@ -417,15 +389,12 @@ class DailyAnalysisPlugin(MaiBotPlugin):
             return
         # 同步分析模型任务与超时设置
         if self._service is not None:
-            self._service.model = await self._validated_model_task(
-                self.config.advanced.model_task, "通用/个人总结"
-            )
-            self._service.topic_model = await self._validated_model_task(
-                self.config.advanced.topic_scan_task, "话题扫描"
-            )
-            self._service.refine_model = await self._validated_model_task(
-                self.config.advanced.event_refine_task, "主要事件精炼"
-            )
+            routes = await self._resolve_plugin_tasks()
+            self._service.model = routes["main"]
+            self._service.topic_model = routes["extract"]
+            self._service.refine_model = routes["compose"]
+            self._service.verify_model = routes["verify"]
+            self._service.user_profile_model = routes["user_profile"]
             self._service.call_timeout_s = max(5, int(self.config.advanced.llm_timeout_seconds or 60))
             self._service.timezone_name = (
                 self.config.auto_summary.timezone or "Asia/Shanghai"
@@ -451,6 +420,28 @@ class DailyAnalysisPlugin(MaiBotPlugin):
             return {}
         try:
             if isinstance(schema, dict):
+                def strip_legacy_fields(node: Any) -> None:
+                    if isinstance(node, dict):
+                        for field_name in _LEGACY_MODEL_FIELDS:
+                            node.pop(field_name, None)
+                        for value in list(node.values()):
+                            strip_legacy_fields(value)
+                    elif isinstance(node, list):
+                        node[:] = [
+                            item
+                            for item in node
+                            if not (
+                                isinstance(item, dict)
+                                and any(
+                                    item.get(key) in _LEGACY_MODEL_FIELDS
+                                    for key in ("name", "id", "key", "field")
+                                )
+                            )
+                        ]
+                        for item in node:
+                            strip_legacy_fields(item)
+
+                strip_legacy_fields(schema)
                 sections = schema.get("sections")
                 if isinstance(sections, dict) and sections:
                     ordered = sorted(
@@ -1402,33 +1393,16 @@ class DailyAnalysisPlugin(MaiBotPlugin):
     async def _build_user_summary_image(
         self, user_messages: List[dict], user_name: str, user_id: str, target_date: datetime
     ) -> Tuple[Optional[str], Optional[str]]:
-        """分析个人各模块并渲染个人总结图片，返回 (base64, summary_text)"""
+        """生成事实型个人画像并渲染，返回 (base64, profile_text)。"""
         service = self._service
         user_stats = service.analyze_single_user_stats(user_messages)
-
-        results = await asyncio.gather(
-            service.analyze_single_user_summary(user_messages, user_name, user_id),
-            service.analyze_single_user_portrait(user_messages, user_name, user_id),
-            service.analyze_single_user_depression(user_messages, user_name, user_id),
-            service.analyze_single_user_quotes(user_messages, user_name, user_id),
-            return_exceptions=True,
+        portrait_data = await service.analyze_single_user_portrait(
+            user_messages, user_name, user_id
         )
-        for r in results:
-            if isinstance(r, Exception):
-                self.ctx.logger.error(f"个人分析子任务异常: {r}", exc_info=r)
-        summary_text = results[0] if isinstance(results[0], str) else None
-        portrait_data = results[1] if isinstance(results[1], dict) else None
-        depression_data = results[2] if isinstance(results[2], dict) else None
-        golden_quotes = results[3] if isinstance(results[3], list) else None
-
-        display_order = _slots_to_display_order(
-            [
-                self.config.user_summary.slot_1,
-                self.config.user_summary.slot_2,
-                self.config.user_summary.slot_3,
-                self.config.user_summary.slot_4,
-            ],
-            _PERSONAL_MODULE_MAP,
+        summary_text = (
+            str(portrait_data.get("summary") or "").strip()
+            if isinstance(portrait_data, dict)
+            else ""
         )
 
         image_base64 = await self._renderer.generate_user_summary_image(
@@ -1438,16 +1412,10 @@ class DailyAnalysisPlugin(MaiBotPlugin):
             message_count=user_stats["message_count"],
             total_characters=user_stats["char_count"],
             emoji_count=user_stats["emoji_count"],
-            hourly_distribution=user_stats["hourly_distribution"],
-            user_title=portrait_data.get("title", "") if portrait_data else "",
-            user_mbti=portrait_data.get("mbti", "") if portrait_data else "",
             portrait_data=portrait_data,
-            depression_data=depression_data,
-            golden_quotes=golden_quotes,
-            display_order=display_order,
             target_date=target_date,
         )
-        return image_base64, summary_text
+        return image_base64, summary_text or None
 
     # ==================== 定时自动总结 ====================
 

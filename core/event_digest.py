@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import re
+import hashlib
 from datetime import datetime
 from typing import Any, Dict, Iterable, List, Sequence, Tuple
 
@@ -75,6 +76,61 @@ def _safe_nonnegative_int(value: Any) -> int:
         return max(0, int(value or 0))
     except (TypeError, ValueError):
         return 0
+
+
+_CLAIM_MAX_LENGTH = 240
+
+
+def _clean_evidence_ids(value: Any, max_items: int = 24) -> List[str]:
+    """清洗源消息证据 ID；证据 ID 只允许作为本地不透明标识传递。"""
+
+    if not isinstance(value, list):
+        return []
+    result: List[str] = []
+    seen = set()
+    for item in value:
+        evidence_id = _clean_text(item, 120)
+        if not evidence_id or evidence_id in seen:
+            continue
+        seen.add(evidence_id)
+        result.append(evidence_id)
+        if len(result) >= max_items:
+            break
+    return result
+
+
+def _claim_text(value: Any) -> str:
+    if isinstance(value, dict):
+        return _clean_text(value.get("claim") or value.get("text") or value.get("value"), _CLAIM_MAX_LENGTH)
+    return _clean_text(value, _CLAIM_MAX_LENGTH)
+
+
+def _normalize_claim_bindings(value: Any, evidence_ids: List[str], max_items: int = 8) -> List[Dict[str, Any]]:
+    """把声明转换成统一的 claim/evidence_ids 结构，保留旧字符串字段兼容性。"""
+
+    if not isinstance(value, list):
+        return []
+    bindings: List[Dict[str, Any]] = []
+    seen = set()
+    for item in value:
+        claim = _claim_text(item)
+        if not claim or claim in seen:
+            continue
+        seen.add(claim)
+        item_ids = _clean_evidence_ids(item.get("evidence_ids") if isinstance(item, dict) else None)
+        bindings.append({"claim": claim, "evidence_ids": item_ids or list(evidence_ids)})
+        if len(bindings) >= max_items:
+            break
+    return bindings
+
+
+def _event_id(raw: Dict[str, Any], start_time: str, end_time: str, title: str, index: int) -> str:
+    configured = _clean_text(raw.get("event_id"), 120)
+    if configured:
+        return configured
+    raw_key = f"{start_time}|{end_time}|{title}|{index}"
+    digest = hashlib.sha1(raw_key.encode("utf-8")).hexdigest()[:12]
+    return f"event-{digest}"
 
 
 def _normalize_anchor(value: Any) -> Dict[str, str] | None:
@@ -149,6 +205,27 @@ def _merge_unique(values: Iterable[Any], limit: int) -> List[str]:
     return merged
 
 
+def _merge_bindings(values: Iterable[Any], limit: int) -> List[Dict[str, Any]]:
+    merged: List[Dict[str, Any]] = []
+    seen = set()
+    for value in values:
+        if not isinstance(value, dict):
+            continue
+        claim = _claim_text(value)
+        if not claim or claim in seen:
+            continue
+        seen.add(claim)
+        merged.append(
+            {
+                "claim": claim,
+                "evidence_ids": _clean_evidence_ids(value.get("evidence_ids")),
+            }
+        )
+        if len(merged) >= limit:
+            break
+    return merged
+
+
 def merge_adjacent_event_candidates(
     events: Iterable[Dict[str, Any]],
     *,
@@ -213,6 +290,35 @@ def merge_adjacent_event_candidates(
             + list(event.get("pending") or []),
             6,
         )
+        previous["facts"] = _merge_unique(
+            list(previous.get("facts") or []) + list(event.get("facts") or []),
+            8,
+        )
+        previous["evidence_ids"] = _merge_unique(
+            list(previous.get("evidence_ids") or [])
+            + list(event.get("evidence_ids") or []),
+            24,
+        )
+        previous["fact_bindings"] = _merge_bindings(
+            list(previous.get("fact_bindings") or [])
+            + list(event.get("fact_bindings") or []),
+            8,
+        )
+        previous["outcome_bindings"] = _merge_bindings(
+            list(previous.get("outcome_bindings") or [])
+            + list(event.get("outcome_bindings") or []),
+            6,
+        )
+        previous["pending_bindings"] = _merge_bindings(
+            list(previous.get("pending_bindings") or [])
+            + list(event.get("pending_bindings") or []),
+            6,
+        )
+        if previous.get("status") != "completed" and event.get("status") in {
+            "decided",
+            "completed",
+        }:
+            previous["status"] = event["status"]
         previous["participants"] = _merge_unique(
             list(previous.get("participants") or [])
             + list(event.get("participants") or []),
@@ -276,7 +382,7 @@ def normalize_event_report(
 
     events: List[Dict[str, Any]] = []
     seen = set()
-    for raw in raw_events:
+    for raw_index, raw in enumerate(raw_events):
         if not isinstance(raw, dict):
             continue
 
@@ -314,6 +420,22 @@ def normalize_event_report(
         outcomes = _clean_string_list(raw.get("outcomes"), 6, 180)
         pending = _clean_string_list(raw.get("pending"), 6, 180)
         participants = _clean_string_list(raw.get("participants"), 8, 40)
+        facts = _clean_string_list(raw.get("facts"), 8, 240)
+        if not facts:
+            facts = [summary]
+        evidence_ids = _clean_evidence_ids(raw.get("evidence_ids"))
+        fact_bindings = _normalize_claim_bindings(
+            raw.get("fact_bindings") or raw.get("facts"), evidence_ids
+        )
+        outcome_bindings = _normalize_claim_bindings(
+            raw.get("outcome_bindings") or raw.get("outcomes"), evidence_ids
+        )
+        pending_bindings = _normalize_claim_bindings(
+            raw.get("pending_bindings") or raw.get("pending"), evidence_ids
+        )
+        status = _clean_text(raw.get("status"), 24).lower()
+        if status not in {"suggested", "inferred", "discussed", "decided", "completed"}:
+            status = "discussed"
 
         links: List[str] = []
         if include_links:
@@ -325,16 +447,23 @@ def normalize_event_report(
 
         events.append(
             {
+                "event_id": _event_id(raw, start_time, end_time, title, raw_index),
+                "status": status,
                 "importance": _normalize_importance(raw.get("importance")),
                 "start_time": start_time,
                 "end_time": end_time,
                 "title": title,
                 "summary": summary,
+                "facts": facts,
                 "outcomes": outcomes,
                 "pending": pending,
                 "participants": participants,
                 "anchors": anchors,
                 "links": links,
+                "evidence_ids": evidence_ids,
+                "fact_bindings": fact_bindings,
+                "outcome_bindings": outcome_bindings,
+                "pending_bindings": pending_bindings,
                 "source_message_count": _safe_nonnegative_int(
                     raw.get("source_message_count")
                 ),
@@ -410,6 +539,13 @@ def build_event_plain_text(
         lines.extend(["", f"概览：{overview}"])
 
     major_events, minor_events = partition_events(report.get("events") or [])
+    status_labels = {
+        "suggested": "建议中",
+        "inferred": "推断中",
+        "discussed": "讨论中",
+        "decided": "已决定",
+        "completed": "已完成",
+    }
     sections = (("主要事件", major_events), ("其他话题时间线", minor_events))
     for section_title, section_events in sections:
         if not section_events:
@@ -419,7 +555,8 @@ def build_event_plain_text(
             lines.extend(
                 [
                     "",
-                    f"{index}. {event['start_time']}—{event['end_time']}｜{event['title']}",
+                    f"{index}. {event['start_time']}—{event['end_time']}｜{event['title']}"
+                    f"｜{status_labels.get(event.get('status'), '讨论中')}",
                     event["summary"],
                 ]
             )
@@ -428,17 +565,23 @@ def build_event_plain_text(
                 if links:
                     lines.append("链接：" + " ".join(links))
                 continue
+            facts = event.get("facts") or []
+            if facts:
+                lines.append("事实：" + "；".join(facts))
             outcomes = event.get("outcomes") or []
             if outcomes:
-                lines.append("结论：" + "；".join(outcomes))
+                lines.append("已确认结果：" + "；".join(outcomes))
             pending = event.get("pending") or []
             if pending:
-                lines.append("待确认：" + "；".join(pending))
+                lines.append("待处理/待确认：" + "；".join(pending))
             for anchor in event.get("anchors") or []:
                 lines.append(f"回查：{anchor['time']} {anchor['speaker']}：{anchor['quote']}")
             links = event.get("links") or []
             if links:
                 lines.append("链接：" + " ".join(links))
+            evidence_count = len(event.get("evidence_ids") or [])
+            if evidence_count:
+                lines.append(f"证据：已绑定 {evidence_count} 条源消息")
 
     coverage = report.get("coverage") or {}
     if coverage:

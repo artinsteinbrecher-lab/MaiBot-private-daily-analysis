@@ -250,12 +250,24 @@
         <div class="event-header">
             <div class="time">{{ event.start_time }}—{{ event.end_time }}</div>
             <h2 class="event-title">{{ event_offset + loop.index }}. {{ event.title }}</h2>
+            <span style="margin-left:auto;padding:5px 10px;border-radius:999px;background:#e7f0f2;color:#315e67;font-size:13px;font-weight:700">
+                {% if event.status == "suggested" %}建议中{% elif event.status == "inferred" %}推断中{% elif event.status == "decided" %}已决定{% elif event.status == "completed" %}已完成{% else %}讨论中{% endif %}
+            </span>
         </div>
         <p class="summary">{{ event.summary }}</p>
 
+        {% if event.facts %}
+        <div class="block">
+            <span class="block-title">事实记录</span>
+            <ul>
+                {% for item in event.facts %}<li>{{ item }}</li>{% endfor %}
+            </ul>
+        </div>
+        {% endif %}
+
         {% if event.outcomes %}
         <div class="block outcomes">
-            <span class="block-title">已确定</span>
+            <span class="block-title">已确认结果</span>
             <ul>
                 {% for item in event.outcomes %}<li>{{ item }}</li>{% endfor %}
             </ul>
@@ -264,7 +276,7 @@
 
         {% if event.pending %}
         <div class="block pending">
-            <span class="block-title">待确认</span>
+            <span class="block-title">待处理 / 待确认</span>
             <ul>
                 {% for item in event.pending %}<li>{{ item }}</li>{% endfor %}
             </ul>
@@ -288,6 +300,10 @@
             </div>
             {% endfor %}
         </div>
+        {% endif %}
+
+        {% if event.evidence_ids %}
+        <div style="margin-top:12px;color:#70838f;font-size:13px">已绑定 {{ event.evidence_ids|length }} 条源消息</div>
         {% endif %}
 
         {% if event.links %}

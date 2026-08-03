@@ -1,10 +1,10 @@
 [plugin]
 enabled = false
-config_version = "3.4.0"
+config_version = "3.6.0"
 
 [summary]
-coverage_mode = "均衡抽样"
-detail_level = "标准"
+coverage_mode = "完整覆盖"
+detail_level = "完整"
 max_events = 12
 # 0 表示普通话题不设用户上限；插件仍保留 500 条安全上限。
 max_minor_events = 0
@@ -17,14 +17,10 @@ include_anchor_quotes = true
 include_links = true
 
 [user_summary]
-# 兼容保留的 /mysummary。只使用群事件日报时建议关闭。
+# 事实型 /mysummary：只展示可观察话题、表达特点、样本时段和真实原话依据。
 enabled = false
 view_others_mode = "白名单"
 allowed_users = []
-slot_1 = "3H活跃轨迹"
-slot_2 = "群友画像+炫压抑评级(并排)"
-slot_3 = "语出惊人"
-slot_4 = "无"
 
 [auto_summary]
 enabled = false
@@ -41,12 +37,10 @@ recipient_user = "111111111"
 admin_users = ["111111111"]
 
 [advanced]
-# MaiBot 模型任务名，不是供应商名、URL 或具体模型名。
-model_task = "utils"
-# 全量话题扫描：建议只配置快速、低成本模型。
-topic_scan_task = "daily_topic_scan"
-# 主要事件精炼：建议强模型优先、快速模型兜底。
-event_refine_task = "daily_event_refine"
+# 模型供应商和模型 ID 不在插件中配置。官方 MaiBot 暂不允许插件动态注册
+# 全局模型任务；未安装配套宿主补丁时，以下四项不会出现在高级任务页面：
+# plugin_daily_extract、plugin_daily_compose、plugin_daily_verify、plugin_user_profile。
+# 宿主未注册的专用任务固定跟随 replyer，插件基本功能仍可正常运行。
 inject_memory = false
 llm_timeout_seconds = 60
 render_timeout_seconds = 25

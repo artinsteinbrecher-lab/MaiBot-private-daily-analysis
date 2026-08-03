@@ -1,4 +1,5 @@
 import asyncio
+import json
 import sys
 import types
 import unittest
@@ -27,7 +28,6 @@ def _load_core_module(module_name):
     return module
 
 
-_load_core_module("constants")
 _load_core_module("event_digest")
 analysis_module = _load_core_module("analysis")
 AnalysisService = analysis_module.AnalysisService
@@ -63,7 +63,31 @@ class EventGroundingTests(unittest.TestCase):
 
     def test_event_time_uses_configured_timezone(self):
         formatted = self.service._format_event_messages(self.messages)
-        self.assertIn("[09:30:20] 小明:", formatted)
+        message_id = self.service._event_message_id(self.messages[0])
+        self.assertIn(f"[09:30:20] [id={message_id}] 小明:", formatted)
+
+    def test_claim_cannot_use_unrelated_real_evidence_id(self):
+        message_id = self.service._event_message_id(self.messages[0])
+        report = self.service._ground_event_report(
+            {
+                "events": [
+                    {
+                        "title": "虚假声明",
+                        "facts": [
+                            {
+                                "claim": "数据库已被永久删除",
+                                "evidence_ids": [message_id],
+                            }
+                        ],
+                    }
+                ]
+            },
+            self.messages,
+            max_events=8,
+            max_anchors=2,
+            include_links=True,
+        )
+        self.assertEqual(report["events"], [])
 
     def test_report_fields_are_grounded_in_source_messages(self):
         report = self.service._ground_event_report(
@@ -280,22 +304,50 @@ class EventGroundingTests(unittest.TestCase):
 
     def test_refinement_grounds_detailed_major_event(self):
         messages = self._bulk_messages(20)
+        messages[0]["processed_plain_text"] = "有效消息 0，服务已经确认恢复，后续继续观察"
         start_time = self.service._event_datetime(messages[0]["time"]).strftime(
             "%H:%M"
         )
+        message_id = self.service._event_message_id(messages[0])
         candidate = self._fake_chunk_report(messages, importance="major")[
             "events"
         ][0]
+        candidate["event_id"] = "candidate-event-1"
 
         async def refined_llm(*args, **kwargs):
-            return (
-                '{"events":[{"candidate_id":"E1","importance":"major",'
-                f'"start_time":"{start_time}","end_time":"{start_time}",'
-                '"title":"详细事件","summary":"完整记录了事情经过和背景。",'
-                '"outcomes":["已经确认"],"pending":["继续观察"],'
-                '"participants":["群友"],'
-                f'"anchors":[{{"time":"{start_time}","speaker":"群友",'
-                '"quote":"有效消息 0"}],"links":[]}]}'
+            return json.dumps(
+                {
+                    "events": [
+                        {
+                            "candidate_id": "E1",
+                            "importance": "major",
+                            "status": "completed",
+                            "start_time": start_time,
+                            "end_time": start_time,
+                            "title": "详细事件",
+                            "summary": "服务已经确认恢复，后续继续观察。",
+                            "facts": [
+                                {"claim": "服务已经确认恢复", "evidence_ids": [message_id]}
+                            ],
+                            "outcomes": [
+                                {"claim": "服务已经确认恢复", "evidence_ids": [message_id]}
+                            ],
+                            "pending": [
+                                {"claim": "后续继续观察", "evidence_ids": [message_id]}
+                            ],
+                            "participants": ["群友"],
+                            "anchors": [
+                                {
+                                    "time": start_time,
+                                    "speaker": "群友",
+                                    "quote": "有效消息 0",
+                                }
+                            ],
+                            "links": [],
+                        }
+                    ]
+                },
+                ensure_ascii=False,
             )
 
         self.service._llm = refined_llm
@@ -310,9 +362,111 @@ class EventGroundingTests(unittest.TestCase):
         )
         event = report["events"][0]
         self.assertTrue(event["refined"])
+        self.assertEqual(event["event_id"], "candidate-event-1")
         self.assertEqual(event["title"], "详细事件")
-        self.assertEqual(event["outcomes"], ["已经确认"])
+        self.assertEqual(event["outcomes"], ["服务已经确认恢复"])
+        self.assertEqual(event["pending"], ["后续继续观察"])
         self.assertEqual(report["refinement"]["refined"], 1)
+
+    def test_verifier_can_only_remove_claims_and_downgrade_status(self):
+        event = {
+            "event_id": "evt-1",
+            "importance": "major",
+            "status": "completed",
+            "facts": ["服务恢复了", "不存在的结论"],
+            "fact_bindings": [
+                {"claim": "服务恢复了", "evidence_ids": ["m-1"]},
+                {"claim": "不存在的结论", "evidence_ids": ["m-1"]},
+            ],
+            "outcomes": [],
+            "outcome_bindings": [],
+            "pending": [],
+            "pending_bindings": [],
+        }
+
+        async def verify_llm(*args, **kwargs):
+            return json.dumps(
+                {
+                    "events": [
+                        {
+                            "event_id": "evt-1",
+                            "status": "discussed",
+                            "unsupported": {
+                                "facts": ["不存在的结论", "模型新增声明"],
+                                "outcomes": [],
+                                "pending": [],
+                            },
+                            "facts": ["模型新增声明"],
+                        }
+                    ]
+                },
+                ensure_ascii=False,
+            )
+
+        self.service._llm = verify_llm
+        verified, count = asyncio.run(
+            self.service._verify_major_batch([event], self.messages)
+        )
+        self.assertEqual(count, 1)
+        self.assertEqual(verified[0]["facts"], ["服务恢复了"])
+        self.assertEqual(verified[0]["status"], "discussed")
+
+    def test_verifier_failure_keeps_locally_grounded_event(self):
+        event = {
+            "event_id": "evt-1",
+            "importance": "major",
+            "status": "discussed",
+            "facts": ["服务恢复了"],
+            "fact_bindings": [{"claim": "服务恢复了", "evidence_ids": ["m-1"]}],
+            "outcomes": [],
+            "outcome_bindings": [],
+            "pending": [],
+            "pending_bindings": [],
+        }
+
+        async def fail_llm(*args, **kwargs):
+            return None
+
+        self.service._llm = fail_llm
+        verified, count = asyncio.run(
+            self.service._verify_major_batch([event], self.messages)
+        )
+        self.assertEqual(count, 0)
+        self.assertEqual(verified, [event])
+
+    def test_user_portrait_uses_dedicated_model_and_filters_fake_quote(self):
+        calls = []
+
+        class LLM:
+            async def generate(self, prompt, **kwargs):
+                calls.append(kwargs.get("model"))
+                return {
+                    "success": True,
+                    "response": json.dumps(
+                        {
+                            "name": "小明",
+                            "summary": "样本中讨论了服务恢复。",
+                            "topics": ["服务恢复"],
+                            "communication_style": "以简短陈述为主。",
+                            "evidence_points": [
+                                {"quote": "服务恢复了", "observation": "报告服务已恢复"},
+                                {"quote": "并不存在的原话", "observation": "无效"},
+                            ],
+                        },
+                        ensure_ascii=False,
+                    ),
+                }
+
+        self.service.ctx.llm = LLM()
+        self.service.user_profile_model = "plugin_user_profile"
+        profile = asyncio.run(
+            self.service.analyze_single_user_portrait(
+                self.messages * 3, "小明", "10001"
+            )
+        )
+        self.assertEqual(calls, ["plugin_user_profile"])
+        self.assertEqual(len(profile["evidence_points"]), 1)
+        self.assertEqual(profile["evidence_points"][0]["quote"], "服务恢复了")
 
     def test_topic_and_refine_calls_use_separate_model_tasks(self):
         self.service.topic_model = "daily_topic_scan"

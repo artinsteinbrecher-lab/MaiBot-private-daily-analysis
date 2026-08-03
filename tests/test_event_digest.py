@@ -206,11 +206,14 @@ class TextOutputTests(unittest.TestCase):
                     "end_time": "09:30",
                     "title": "处理故障",
                     "summary": "定位并修复配置问题。",
+                    "status": "completed",
+                    "facts": ["小明确认配置问题已经修复"],
                     "outcomes": ["服务恢复"],
                     "pending": ["继续观察"],
                     "participants": ["小明"],
                     "anchors": [{"time": "09:22", "speaker": "小明", "quote": "现在恢复了"}],
                     "links": ["https://example.com/log"],
+                    "evidence_ids": ["m-001", "m-002"],
                 }
             ],
         }
@@ -224,8 +227,13 @@ class TextOutputTests(unittest.TestCase):
             self.report,
         )
         self.assertIn("09:00—09:30", text)
+        self.assertIn("已完成", text)
+        self.assertIn("事实：小明确认配置问题已经修复", text)
+        self.assertIn("已确认结果：服务恢复", text)
+        self.assertIn("待处理/待确认：继续观察", text)
         self.assertIn("回查：09:22 小明：现在恢复了", text)
         self.assertIn("https://example.com/log", text)
+        self.assertIn("证据：已绑定 2 条源消息", text)
 
     def test_index_lists_all_statuses(self):
         text = build_daily_index_text(
