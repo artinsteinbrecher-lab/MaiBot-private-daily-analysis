@@ -2,6 +2,9 @@
 
 维护仓库：[artinsteinbrecher-lab/MaiBot-private-daily-analysis](https://github.com/artinsteinbrecher-lab/MaiBot-private-daily-analysis)
 
+当前安装包：`khiqwq_daily_analysis-v3.6.0-standard.zip` ·
+[查看正式 Release](https://github.com/artinsteinbrecher-lab/MaiBot-private-daily-analysis/releases/tag/v3.6.0)
+
 适用于 MaiBot 1.x / `maibot_sdk` 2.x 的事实型群聊日报插件。它读取明确配置的 QQ 群白名单，生成带时间戳和回查锚点的
 事实型群事件日报，并且只将进度、结果和错误发送到管理员 QQ 私聊。
 
@@ -24,7 +27,7 @@
 - 时间、参与者、链接和引用会与源消息再次核对，不能落到原记录的字段会被移除。
 - 保留上游 `/mysummary` 个人总结，可独立关闭。
 
-插件不会生成活跃度、MBTI、群友画像、金句排行或情绪指数等娱乐分析。
+插件不会生成活跃度、MBTI、娱乐化群友画像、金句排行或情绪指数；`/mysummary` 保留的是有消息证据支持的事实型个人画像。
 
 ## 兼容范围
 
@@ -36,17 +39,27 @@
 插件不直连 NapCat，也不保存模型 URL、API Key 或供应商配置。消息读取、模型调用、渲染和发送
 均通过 MaiBot 官方 `ctx.*` 能力完成。
 
-## 官方安装方式
+## 五分钟安装
 
-1. 将完整插件目录放入 MaiBot 的插件目录。
-2. 在 MaiBot WebUI 的“插件管理”中加载插件。
-3. 点击插件设置，在 WebUI 中填写配置。
-4. 保存后启用插件；配置更新由 MaiBot 的官方配置生命周期处理。
+1. 解压 standard ZIP，保留其中唯一的顶层插件目录。
+2. 将该目录放入 MaiBot 插件目录。Docker 常见宿主路径为 `./data/MaiMBot/plugins/`，并确认 `plugin.py` 直接位于：
+
+   ```text
+   ./data/MaiMBot/plugins/<插件目录>/plugin.py
+   ```
+
+   如果出现 `<插件目录>/<插件目录>/plugin.py`，说明多套了一层目录。
+3. 升级已有安装时先备份原目录，替换程序文件但保留真实 `config.toml` 和独立插件数据目录。
+4. 在 MaiBot WebUI 的“插件管理”中加载插件，在插件设置中至少填写来源群 `target_chats`、接收账号 `recipient_user` 和包含该账号的 `admin_users`。
+5. 保存并启用，确认日志出现“私聊群事件日报插件已加载”，再由管理员私聊执行 `/summary 群号 今天`。
+
+开始通知、处理进度、报告与完成通知都进入管理员私聊，即表示安装成功。首次测试的群需要已经有当天消息，并达到 `min_messages`。
 
 仅执行以上步骤即可使用完整的群聊日报功能。默认情况下，四个需要 LLM 的流程都使用
 MaiBot 的 `replyer` 任务，不要求修改 MaiBot 主程序。
 
 普通版不包含宿主补丁，也不会在 MaiBot 高级模型任务页面新增插件专用任务。
+不要执行 `extras/` 安装脚本；standard ZIP 本身也不包含该目录。
 
 发布目录至少应包含：
 
