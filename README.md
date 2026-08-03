@@ -4,18 +4,55 @@
 
 维护仓库：[artinsteinbrecher-lab/MaiBot-private-daily-analysis](https://github.com/artinsteinbrecher-lab/MaiBot-private-daily-analysis)
 
+当前正式版本：[v3.6.0](https://github.com/artinsteinbrecher-lab/MaiBot-private-daily-analysis/releases/tag/v3.6.0) ·
+[查看全部 Release](https://github.com/artinsteinbrecher-lab/MaiBot-private-daily-analysis/releases)
+
 适用于 MaiBot 1.x / `maibot_sdk` 2.x 的事实型群聊日报插件。它读取明确配置的 QQ 群白名单，生成带时间戳和回查锚点的
 事实型群事件日报，并且只将进度、结果和错误发送到管理员 QQ 私聊。
 
+## 文档导航
+
+| 你的目标 | 从这里开始 |
+|---|---|
+| 第一次安装、只想直接使用 | [五分钟快速开始](#五分钟快速开始普通版) |
+| 了解普通版完整配置 | [普通版说明](packaging/standard/README.md) |
+| 给四个流程分别分配模型 | [增强版说明](packaging/multimodel/README.md) → [宿主扩展操作](extras/README.md) |
+| 选择四个任务的模型 | [模型分配建议](docs/MODEL_ASSIGNMENT.md) |
+| 遇到安装或运行问题 | [故障排查](#故障排查) → [获取支持](SUPPORT.md) |
+| 修改代码或发布版本 | [参与贡献](CONTRIBUTING.md) → [发布流程](docs/RELEASING.md) |
+| 浏览全部说明书 | [文档索引](docs/README.md) |
+
 ## 下载选择
 
-- 普通用户：下载 Release 附件中的 `khiqwq_daily_analysis-vX.Y.Z-standard.zip`，只安装插件，不修改 MaiBot。
-- 多模型高级用户：下载 `khiqwq_daily_analysis-vX.Y.Z-multimodel.zip`，再按 `extras/README.md` 检查并应用四任务路由。
+- 普通用户：[下载 v3.6.0 standard](https://github.com/artinsteinbrecher-lab/MaiBot-private-daily-analysis/releases/download/v3.6.0/khiqwq_daily_analysis-v3.6.0-standard.zip)，只安装插件，不修改 MaiBot。
+- 多模型高级用户：[下载 v3.6.0 multimodel](https://github.com/artinsteinbrecher-lab/MaiBot-private-daily-analysis/releases/download/v3.6.0/khiqwq_daily_analysis-v3.6.0-multimodel.zip)，先按普通插件完成验证，再按 `extras/README.md` 检查并应用四任务路由。
 - 两个安装包使用完全相同的总结核心；差异只在是否附带 MaiBot 高级模型任务路由工具。
 - GitHub 自动生成的 Source code 压缩包是完整源码快照，不等同于普通插件安装包。
 
 本插件不再承担群聊静默。需要绝对静默时，请独立安装“QQ 群绝对静默守卫”插件。
 拆分后，静默规则与日报的模型调用、数据库读取、图片渲染和启停状态互不依赖。
+
+## 五分钟快速开始（普通版）
+
+1. 下载上面的 standard ZIP，只解压其中唯一的顶层插件目录。
+2. 将该目录放入 MaiBot 插件目录。Docker 常见宿主路径为 `./data/MaiMBot/plugins/`；最终应能直接看到：
+
+   ```text
+   ./data/MaiMBot/plugins/<插件目录>/plugin.py
+   ./data/MaiMBot/plugins/<插件目录>/_manifest.json
+   ```
+
+   不要形成 `<插件目录>/<插件目录>/plugin.py` 的双层嵌套。
+3. 如果是升级已有安装，先备份原插件目录；替换程序文件时保留现有 `config.toml` 和独立插件数据目录。
+4. 在 MaiBot WebUI 的“插件管理”中加载插件，然后至少填写：
+
+   - `auto_summary.target_chats`：允许读取的来源群；
+   - `auto_summary.recipient_user`：自动日报接收账号；
+   - `command_permission.admin_users`：允许操作的管理员账号，必须包含上述接收账号。
+
+5. 保存并启用后，确认日志出现“私聊群事件日报插件已加载”，再由管理员私聊发送 `/summary 群号 今天`。
+
+首次验证建议选择当天已有消息且达到 `min_messages` 的群。看到开始通知、处理进度、报告和完成通知均出现在管理员私聊，即表示普通版安装成功。standard 到这里已经完成，不需要执行 `extras/` 中的任何脚本。
 
 ## 主要能力
 
@@ -30,7 +67,7 @@
 - 时间、参与者、链接和引用会与源消息再次核对，不能落到原记录的字段会被移除。
 - 保留上游 `/mysummary` 个人总结，可独立关闭。
 
-插件不会生成活跃度、MBTI、群友画像、金句排行或情绪指数等娱乐分析。
+插件不会生成活跃度、MBTI、娱乐化群友画像、金句排行或情绪指数；`/mysummary` 保留的是有消息证据支持的事实型个人画像。
 
 ## 兼容范围
 
@@ -42,21 +79,14 @@
 插件不直连 NapCat，也不保存模型 URL、API Key 或供应商配置。消息读取、模型调用、渲染和发送
 均通过 MaiBot 官方 `ctx.*` 能力完成。
 
-## 官方安装方式
+## 安装边界
 
-1. 将完整插件目录放入 MaiBot 的插件目录。
-2. 在 MaiBot WebUI 的“插件管理”中加载插件。
-3. 点击插件设置，在 WebUI 中填写配置。
-4. 保存后启用插件；配置更新由 MaiBot 的官方配置生命周期处理。
+- standard 按上面的五分钟流程安装即可，四个 LLM 流程统一跟随 MaiBot `replyer`，不修改 MaiBot 主程序。
+- multimodel 也必须先作为普通插件验证成功；只有需要分别分配模型时，才继续执行 `extras/README.md` 的宿主扩展流程。
+- 官方 SDK 目前没有让普通插件自行注册全局模型任务的接口，因此四任务路由不能靠复制插件目录自动完成。
+- 插件更新不会修改 MaiBot 的模型供应商、URL、API Key 或模型 ID。
 
-仅执行以上步骤即可使用完整的群聊日报功能。默认情况下，四个需要 LLM 的流程都使用
-MaiBot 的 `replyer` 任务，不要求修改 MaiBot 主程序。
-
-如果希望在 MaiBot“高级模型任务”页面中分别给提取、编排、复核和个人画像指定模型，
-还需要应用仓库 `extras/maibot-plugin-task-routing.patch` 中的可选宿主补丁。官方 SDK
-目前没有让插件自行注册全局模型任务的接口，因此这一步不能由普通插件安装自动完成。
-
-发布目录至少应包含：
+有效插件目录至少应包含：
 
 ```text
 plugin.py

@@ -2,10 +2,13 @@
 
 维护仓库：[artinsteinbrecher-lab/MaiBot-private-daily-analysis](https://github.com/artinsteinbrecher-lab/MaiBot-private-daily-analysis)
 
+当前安装包：`khiqwq_daily_analysis-v3.6.0-multimodel.zip` ·
+[查看正式 Release](https://github.com/artinsteinbrecher-lab/MaiBot-private-daily-analysis/releases/tag/v3.6.0)
+
 适用于 MaiBot 1.x / `maibot_sdk` 2.x 的事实型群聊日报插件。它读取明确配置的 QQ 群白名单，生成带时间戳和回查锚点的
 事实型群事件日报，并且只将进度、结果和错误发送到管理员 QQ 私聊。
 
-这是面向高质量多模型协作的增强候选：插件核心与普通版完全相同，只额外提供受版本约束的 MaiBot 高级模型任务兼容补丁。
+这是面向高质量多模型协作的增强版本：插件核心与普通版完全相同，只额外提供受版本约束的 MaiBot 高级模型任务兼容补丁。
 不应用补丁时，它与普通版行为一致，四个 LLM 流程全部跟随 `replyer`。
 
 本插件不再承担群聊静默。需要绝对静默时，请独立安装“QQ 群绝对静默守卫”插件。
@@ -24,7 +27,7 @@
 - 时间、参与者、链接和引用会与源消息再次核对，不能落到原记录的字段会被移除。
 - 保留上游 `/mysummary` 个人总结，可独立关闭。
 
-插件不会生成活跃度、MBTI、群友画像、金句排行或情绪指数等娱乐分析。
+插件不会生成活跃度、MBTI、娱乐化群友画像、金句排行或情绪指数；`/mysummary` 保留的是有消息证据支持的事实型个人画像。
 
 ## 兼容范围
 
@@ -36,19 +39,28 @@
 插件不直连 NapCat，也不保存模型 URL、API Key 或供应商配置。消息读取、模型调用、渲染和发送
 均通过 MaiBot 官方 `ctx.*` 能力完成。
 
-## 官方安装方式
+## 安装方式
 
-1. 将完整插件目录放入 MaiBot 的插件目录。
-2. 在 MaiBot WebUI 的“插件管理”中加载插件。
-3. 点击插件设置，在 WebUI 中填写配置。
-4. 保存后启用插件；配置更新由 MaiBot 的官方配置生命周期处理。
+### 第一阶段：先按普通插件验证
 
-仅执行以上步骤即可使用完整的群聊日报功能。默认情况下，四个需要 LLM 的流程都使用
-MaiBot 的 `replyer` 任务，不要求修改 MaiBot 主程序。
+1. 解压 multimodel ZIP，将唯一的顶层插件目录放入 MaiBot 插件目录。Docker 常见宿主路径为 `./data/MaiMBot/plugins/`。
+2. 确认 `plugin.py` 直接位于 `./data/MaiMBot/plugins/<插件目录>/plugin.py`，没有双层目录嵌套。
+3. 升级已有安装时先备份原目录，替换程序文件但保留真实 `config.toml` 和独立插件数据目录。
+4. 在 MaiBot WebUI 中加载并启用插件，至少填写 `target_chats`、`recipient_user` 和包含该账号的 `admin_users`。
+5. 先由管理员私聊执行 `/summary 群号 今天`，确认开始、进度、报告和完成通知都只进入管理员私聊。
 
-如需在 MaiBot“高级模型任务”页面分别给提取、编排、复核和个人画像指定模型，
-使用 `extras/install_maibot_task_routing.py` 先检测兼容性，再备份并应用宿主改动。
-官方 SDK 目前没有让普通插件自行注册全局模型任务的接口，因此该能力必须由增强版显式修改宿主。
+到这里插件已经具备与 standard 完全相同的总结能力；如果不需要分别分配模型，可以停止，不必修改 MaiBot。
+
+### 第二阶段：可选启用四任务路由
+
+1. 阅读 `extras/README.md` 的支持边界和 Docker 说明。
+2. 对实际生效的 MaiBot 源码树运行只读 `--check`；只有 `pristine` 才能应用，`installed` 表示已经完整安装。
+3. 运行 `--apply`，保存脚本输出的备份目录，然后按原部署方式重新构建或重建 MaiBot 容器。
+4. 再次执行 `--check` 确认 `installed`，最后才在 MaiBot 高级模型任务中配置四个专用任务。
+
+第一阶段完成后，四个 LLM 流程默认跟随 MaiBot `replyer`，不要求修改 MaiBot 主程序。
+第二阶段才使用 `extras/install_maibot_task_routing.py` 检测兼容性、备份并应用宿主改动。
+官方 SDK 目前没有让普通插件自行注册全局模型任务的接口，因此四任务路由不能靠复制插件目录自动完成。
 
 发布目录至少应包含：
 
