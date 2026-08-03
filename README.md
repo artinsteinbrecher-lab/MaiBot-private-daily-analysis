@@ -1,5 +1,7 @@
 # MaiBot 私聊群事件日报
 
+[![Validate](https://github.com/artinsteinbrecher-lab/MaiBot-private-daily-analysis/actions/workflows/validate.yml/badge.svg)](https://github.com/artinsteinbrecher-lab/MaiBot-private-daily-analysis/actions/workflows/validate.yml)
+
 维护仓库：[artinsteinbrecher-lab/MaiBot-private-daily-analysis](https://github.com/artinsteinbrecher-lab/MaiBot-private-daily-analysis)
 
 适用于 MaiBot 1.x / `maibot_sdk` 2.x 的事实型群聊日报插件。它读取明确配置的 QQ 群白名单，生成带时间戳和回查锚点的
@@ -276,6 +278,12 @@ python3 -m py_compile plugin.py core/analysis.py core/rendering.py core/event_di
 - 日报只发给配置的管理员私聊，但管理员应自行保护生成内容。
 - 插件不读取服务器密码、NapCat Token、WebUI Token 或模型 API Key。
 - 使用前应遵守群成员知情、平台规则和适用的数据保护要求。
+
+## 参与维护
+
+提交改动前请阅读 [CONTRIBUTING.md](CONTRIBUTING.md)。仓库会在 Pull Request 和发布分支上自动运行
+Python 3.11/3.13 测试、增强安装器测试、语法检查、双包构建与 SHA256 校验；自动化只产出候选附件，
+不会自动创建正式 Release 或版本标签。
 
 ## 许可与来源
 

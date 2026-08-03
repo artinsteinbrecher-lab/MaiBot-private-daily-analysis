@@ -21,6 +21,7 @@ COMMON_FILES = (
 )
 COMMON_DIRS = ("core", "templates", "fonts", "tests")
 TEXT_SUFFIXES = {".py", ".md", ".toml", ".json", ".html", ".txt", ".patch"}
+RELEASE_IGNORE = shutil.ignore_patterns("__pycache__", "*.pyc", "*.pyo")
 SECRET_RE = re.compile(
     r"(?i)(api[_-]?key|access[_-]?token|secret[_-]?key|password|passwd)"
     r"\s*[:=]\s*[\"']?[A-Za-z0-9_./+\-=]{12,}"
@@ -41,7 +42,7 @@ def files_under(root: Path) -> list[Path]:
 
 def copy_entry(source: Path, target: Path) -> None:
     if source.is_dir():
-        shutil.copytree(source, target)
+        shutil.copytree(source, target, ignore=RELEASE_IGNORE)
     else:
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source, target)

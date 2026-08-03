@@ -1,0 +1,88 @@
+name: Validate
+
+on:
+  push:
+    branches:
+      - main
+      - "codex/**"
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: validate-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tests:
+    name: Python ${{ matrix.python-version }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.13"]
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install test dependencies
+        run: python -m pip install --upgrade pip jinja2
+
+      - name: Run core tests
+        run: python -m unittest discover -s tests -v
+
+      - name: Run enhanced installer tests
+        run: python -m unittest discover -s extras/tests -v
+
+      - name: Compile release-critical modules
+        run: >-
+          python -m py_compile
+          plugin.py
+          core/analysis.py
+          core/constants.py
+          core/event_digest.py
+          core/rendering.py
+          extras/install_maibot_task_routing.py
+          scripts/build_release.py
+
+  package:
+    name: Build dual-package candidates
+    needs: tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - name: Install build dependencies
+        run: python -m pip install --upgrade pip jinja2
+
+      - name: Build standard and multimodel packages
+        run: python scripts/build_release.py
+
+      - name: Verify release checksums
+        working-directory: dist
+        run: sha256sum -c SHA256SUMS.txt
+
+      - name: Upload release candidates
+        uses: actions/upload-artifact@v7
+        with:
+          name: dual-package-release-candidates-${{ github.sha }}
+          path: |
+            dist/*.zip
+            dist/SHA256SUMS.txt
+            dist/CORE_COMPARISON.txt
+            dist/FILE_MANIFEST.txt
+          if-no-files-found: error
+          retention-days: 14
