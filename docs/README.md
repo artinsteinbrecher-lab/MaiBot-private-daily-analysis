@@ -2,22 +2,26 @@
 
 按你的身份选择入口，不需要从头阅读全部文件。
 
-## 普通安装者
+## 普通版 v3.6.0
 
-1. 从[仓库首页](../README.md#下载选择)下载 standard ZIP。
-2. 按首页的[五分钟快速开始](../README.md#五分钟快速开始普通版)安装并完成一次管理员私聊验证。
-3. 需要全部配置字段、命令和故障排查时，阅读[普通版完整说明](../packaging/standard/README.md)。
+适合大多数用户，不修改 MaiBot，直接使用 MaiBot 当前的默认回复模型。
 
-普通版不修改 MaiBot，不注册新的全局模型任务，四个 LLM 流程统一跟随 `replyer`。
+- [回到仓库首页选择下载](../README.md)
+- [阅读普通版完整说明](../packaging/standard/README.md)
 
-## 多模型增强版安装者
+## 增强版 v3.6.0
 
-1. 先把 multimodel 当作普通插件安装并验证成功。
-2. 阅读[增强版完整说明](../packaging/multimodel/README.md)了解增强版边界。
-3. 按[宿主扩展操作说明](../extras/README.md)对实际 MaiBot 源码树执行只读检查、备份、应用、重建和复核。
-4. 最后在 MaiBot 高级模型任务中配置四个插件专用任务；留空项继续跟随 `replyer`。
+适合已经接入多个模型、愿意修改并重建 MaiBot 的用户。它可以给找事实、写日报、复查和人物画像分别选择模型。
 
-不要在插件设置中重复填写供应商、URL、API Key 或模型 ID。
+- [阅读增强版完整说明](../packaging/multimodel/README.md)
+- [阅读宿主修改说明](../extras/README.md)
+
+## 经典禁言版 v3.1.0
+
+这是禁言拆分前最后一个稳定版本，只推荐给必须把总结和禁言放在同一个插件里的用户。
+
+- [下载、安装和风险说明](LEGACY_SILENCE.md)
+- [查看 v3.1.0 Release](https://github.com/artinsteinbrecher-lab/MaiBot-private-daily-analysis/releases/tag/v3.1.0)
 
 ## 模型选型与验收
 

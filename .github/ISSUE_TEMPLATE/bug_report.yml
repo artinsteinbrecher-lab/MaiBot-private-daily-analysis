@@ -28,6 +28,7 @@ body:
       options:
         - standard
         - multimodel
+        - legacy-silence v3.1.0
         - 源码检出
     validations:
       required: true
