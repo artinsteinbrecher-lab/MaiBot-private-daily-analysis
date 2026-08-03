@@ -13,15 +13,16 @@ class ReleaseCopyTests(unittest.TestCase):
         manifest = json.loads((root / "_manifest.json").read_text(encoding="utf-8"))
         version = validate_version(manifest["version"])
         readme = (root / "README.md").read_text(encoding="utf-8")
+        downloads = (root / "docs" / "DOWNLOADS.md").read_text(encoding="utf-8")
 
-        self.assertIn(f"/releases/tag/v{version}", readme)
-        self.assertIn(f"khiqwq_daily_analysis-v{version}-", readme)
+        self.assertIn(f"/releases/tag/v{version}", downloads)
+        self.assertIn(f"khiqwq_daily_analysis-v{version}-", downloads)
 
         packaging = root / "packaging"
         if packaging.exists():
             for variant in ("standard", "multimodel"):
                 filename = f"khiqwq_daily_analysis-v{version}-{variant}.zip"
-                self.assertIn(f"/releases/download/v{version}/{filename}", readme)
+                self.assertIn(f"/releases/download/v{version}/{filename}", downloads)
                 variant_readme = (packaging / variant / "README.md").read_text(
                     encoding="utf-8"
                 )
@@ -30,7 +31,15 @@ class ReleaseCopyTests(unittest.TestCase):
 
     def test_primary_document_navigation_links_exist(self):
         root = Path(__file__).resolve().parents[1]
-        for markdown in (root / "README.md", root / "docs" / "README.md"):
+        for markdown in (
+            root / "README.md",
+            root / "docs" / "README.md",
+            root / "docs" / "DOWNLOADS.md",
+            root / "docs" / "LEGACY_SILENCE.md",
+            root / "packaging" / "standard" / "README.md",
+            root / "packaging" / "multimodel" / "README.md",
+            root / "extras" / "README.md",
+        ):
             if not markdown.exists():
                 continue
             text = markdown.read_text(encoding="utf-8")
@@ -64,8 +73,39 @@ class ReleaseCopyTests(unittest.TestCase):
             readme.index("如果你想换一种用法"),
         )
         self.assertIn("麦麦群安静插件", readme)
-        self.assertIn("麦麦最新改版插件 v3.6.0", readme)
+        self.assertIn("麦麦认真写书", readme)
+        self.assertIn("麦麦一起写书", readme)
         self.assertIn("/mysummary", readme)
+
+    def test_download_page_and_three_version_guides_are_complete(self):
+        root = Path(__file__).resolve().parents[1]
+        downloads = (root / "docs" / "DOWNLOADS.md").read_text(encoding="utf-8")
+        quiet = (root / "docs" / "LEGACY_SILENCE.md").read_text(encoding="utf-8")
+        standard = (root / "packaging" / "standard" / "README.md").read_text(
+            encoding="utf-8"
+        )
+        multimodel = (root / "packaging" / "multimodel" / "README.md").read_text(
+            encoding="utf-8"
+        )
+        extras = (root / "extras" / "README.md").read_text(encoding="utf-8")
+
+        for edition_name in ("麦麦安静写书", "麦麦认真写书", "麦麦一起写书"):
+            self.assertIn(edition_name, downloads)
+        self.assertIn("安装只要三步", quiet)
+        self.assertIn("主要事件", standard)
+        self.assertIn("普通话题", standard)
+        self.assertIn("五分钟安装", standard)
+        self.assertIn("第一阶段：先按普通插件验证", multimodel)
+        self.assertIn("第二阶段：可选启用四任务路由", multimodel)
+        self.assertIn("install_maibot_task_routing.py /path/to/MaiBot --check", extras)
+        self.assertIn("install_maibot_task_routing.py /path/to/MaiBot --apply", extras)
+        for task_name in (
+            "plugin_daily_extract",
+            "plugin_daily_compose",
+            "plugin_daily_verify",
+            "plugin_user_profile",
+        ):
+            self.assertIn(task_name, multimodel)
 
     def test_manifest_version_must_be_semver(self):
         self.assertEqual(validate_version("3.6.0"), "3.6.0")

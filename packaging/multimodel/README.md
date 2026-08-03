@@ -1,15 +1,16 @@
-# MaiBot 私聊群事件日报（多模型增强改包版）
+# 麦麦一起写书 · v3.6.0 多模型版
 
 维护仓库：[artinsteinbrecher-lab/MaiBot-private-daily-analysis](https://github.com/artinsteinbrecher-lab/MaiBot-private-daily-analysis)
 
 当前安装包：`khiqwq_daily_analysis-v3.6.0-multimodel.zip` ·
-[查看正式 Release](https://github.com/artinsteinbrecher-lab/MaiBot-private-daily-analysis/releases/tag/v3.6.0)
+[查看正式 Release](https://github.com/artinsteinbrecher-lab/MaiBot-private-daily-analysis/releases/tag/v3.6.0) ·
+[返回版本与下载](../../docs/DOWNLOADS.md)
 
-这是给已经接入多个模型、希望“不同工作交给不同模型”的用户准备的版本。
+这个版本让多个模型一起完成日报：可以分别负责读取事实、整理成稿、复查内容和生成人物小结。
 
-它和普通版的总结功能完全一样，只是多带了一套修改 MaiBot 的工具。使用工具后，才可以让不同模型分别负责找事实、整理日报、复查内容和生成人物画像。不应用修改时，它就和普通版一样使用 MaiBot 默认回复模型。
+它和“麦麦认真写书”的总结功能完全一样，只是多带了一套修改 MaiBot 的工具。使用工具后，才可以让不同模型分别负责找事实、整理日报、复查内容和生成人物画像。不应用修改时，它就和标准版一样使用 MaiBot 默认回复模型。
 
-本插件不再承担群聊静默。需要绝对静默时，请独立安装“QQ 群绝对静默守卫”插件。
+本插件不再承担群聊静默。需要让麦麦在指定群里保持安静时，请搭配“麦麦群安静插件”。
 拆分后，静默规则与日报的模型调用、数据库读取、图片渲染和启停状态互不依赖。
 
 ## 它能做什么
@@ -229,7 +230,7 @@ split_chunk_on_failure = true
 ## 独立绝对静默
 
 日报从 v3.2 起已移除 `[silence]` 配置和发送前 Hook。要让指定群绝对静默，请使用独立的
-“QQ 群绝对静默守卫”，并在守卫的群名单中填写目标群号。这样：
+“麦麦群安静插件”，并在安静名单中填写目标群号。这样：
 
 - 守卫只负责阻止名单内群聊的出站消息；
 - 日报仍可读取已入库消息并私聊发送结果；
@@ -260,7 +261,7 @@ python3 -m py_compile plugin.py core/analysis.py core/rendering.py core/event_di
 
 检查管理员私聊是否进入 MaiBot、账号是否在 `admin_users`、私聊会话是否能打开。
 若宿主未注册专用任务，插件会固定跟随 `replyer`。若已应用增强补丁但专用任务留空，则由 MaiBot 自身将该任务回退到 `replyer`。
-绝对静默守卫只匹配群聊，不应匹配管理员私聊。
+麦麦群安静插件只匹配群聊，不应匹配管理员私聊。
 
 ### 配置了群但没有日报
 
