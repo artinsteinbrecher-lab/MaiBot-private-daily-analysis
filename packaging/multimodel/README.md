@@ -1,6 +1,6 @@
 # MaiBot 私聊群事件日报（多模型增强改包版）
 
-维护仓库：[khiqwq/Maibot_daily_analysis](https://github.com/khiqwq/Maibot_daily_analysis)
+维护仓库：[artinsteinbrecher-lab/MaiBot-private-daily-analysis](https://github.com/artinsteinbrecher-lab/MaiBot-private-daily-analysis)
 
 适用于 MaiBot 1.x / `maibot_sdk` 2.x 的事实型群聊日报插件。它读取明确配置的 QQ 群白名单，生成带时间戳和回查锚点的
 事实型群事件日报，并且只将进度、结果和错误发送到管理员 QQ 私聊。

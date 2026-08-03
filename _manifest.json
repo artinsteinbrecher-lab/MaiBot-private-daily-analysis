@@ -6,15 +6,15 @@
   "name": "私聊群事件日报",
   "description": "按白名单读取 QQ 群聊天记录，生成带证据绑定、独立复核和回查锚点的事实型日报，并仅发送给指定管理员私聊。保留事实型个人画像，不包含娱乐评级。",
   "author": {
-    "name": "khiqwq",
-    "url": "https://github.com/khiqwq"
+    "name": "artinsteinbrecher-lab",
+    "url": "https://github.com/artinsteinbrecher-lab"
   },
   "license": "GPL-3.0-or-later",
   "urls": {
-    "repository": "https://github.com/khiqwq/Maibot_daily_analysis",
-    "homepage": "https://github.com/khiqwq/Maibot_daily_analysis",
+    "repository": "https://github.com/artinsteinbrecher-lab/MaiBot-private-daily-analysis",
+    "homepage": "https://github.com/artinsteinbrecher-lab/MaiBot-private-daily-analysis",
     "documentation": "https://docs.mai-mai.org/plugin/",
-    "issues": "https://github.com/khiqwq/Maibot_daily_analysis/issues"
+    "issues": "https://github.com/artinsteinbrecher-lab/MaiBot-private-daily-analysis/issues"
   },
   "host_application": {
     "min_version": "1.0.0",
