@@ -9,13 +9,21 @@
 [下载“麦麦安静写书”](https://github.com/artinsteinbrecher-lab/MaiBot-private-daily-analysis/releases/download/v3.1.0/khiqwq_daily_analysis-v3.1.0-legacy-silence.zip) ·
 [打开下载页](https://github.com/artinsteinbrecher-lab/MaiBot-private-daily-analysis/releases/tag/v3.1.0)
 
-## 五步装好
+## 安装只要三步
 
-1. 先备份现在的插件文件夹和 `config.toml`。
-2. 如果已经装了这个仓库的其他版本，先停用并移走它。它们不能同时加载。
-3. 解压下载好的 ZIP，把里面唯一的插件文件夹放进 MaiBot 的插件目录。
-4. 在插件页面里填好来源群、管理员和日报接收账号，先不要打开禁言。保存后，由管理员私聊发送 `/summary 群号 今天`。
-5. 确认能收到日报后，再打开 `silence`（禁言），先试一个群。管理员私聊仍然正常，就可以继续添加其他群了。
+1. 下载 ZIP，然后解压。
+2. 把解压出来的插件文件夹放进 MaiBot 的 `plugins` 文件夹。
+3. 重启 MaiBot，或者在插件页面重新加载并启用它。
+
+常见 Docker 安装里的位置是 `./data/MaiMBot/plugins/`。放好后，插件文件夹里应该直接能看到 `plugin.py`。
+
+如果已经装了这个仓库的其他版本，先停用并移走它。它们不能同时加载。替换旧版本前，顺手备份原来的插件文件夹和 `config.toml` 会更安心。
+
+## 第一次使用
+
+先在插件页面里填好来源群、管理员和日报接收账号，不要急着打开禁言。保存后，由管理员私聊发送 `/summary 群号 今天`。
+
+能收到日报后，再打开 `silence`（禁言），先试一个群。管理员私聊仍然正常，就可以慢慢添加其他群了。
 
 ## 安静模式是什么样子
 
