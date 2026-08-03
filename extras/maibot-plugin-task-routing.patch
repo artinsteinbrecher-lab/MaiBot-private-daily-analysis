@@ -1,0 +1,70 @@
+diff --git a/src/config/config.py b/src/config/config.py
+index f0229a3..43eb493 100644
+--- a/src/config/config.py
++++ b/src/config/config.py
+@@ -70 +70 @@
+-MODEL_CONFIG_VERSION: str = "1.17.6"
++MODEL_CONFIG_VERSION: str = "1.17.7"
+diff --git a/src/config/default_model_config.py b/src/config/default_model_config.py
+index d7d3a35..32bdb2d 100644
+--- a/src/config/default_model_config.py
++++ b/src/config/default_model_config.py
+@@ -62,0 +63,4 @@ DEFAULT_TASK_CONFIG_TEMPLATES: dict[str, dict[str, Any]] = {
++    "plugin_daily_extract": {"model_list": [], "max_tokens": 3200, "temperature": 0.1, "hard_timeout": 240.0},
++    "plugin_daily_compose": {"model_list": [], "max_tokens": 3200, "temperature": 0.1, "hard_timeout": 240.0},
++    "plugin_daily_verify": {"model_list": [], "max_tokens": 2500, "temperature": 0.0, "hard_timeout": 240.0},
++    "plugin_user_profile": {"model_list": [], "max_tokens": 2500, "temperature": 0.2, "hard_timeout": 240.0},
+diff --git a/src/config/model_configs.py b/src/config/model_configs.py
+index 5bda82e..30615c9 100644
+--- a/src/config/model_configs.py
++++ b/src/config/model_configs.py
+@@ -504,0 +505,40 @@ class ModelTaskConfig(ConfigBase):
++    plugin_daily_extract: TaskConfig = Field(
++        default_factory=TaskConfig,
++        json_schema_extra={
++            "x-widget": "custom",
++            "x-icon": "search",
++            "advanced": True,
++        },
++    )
++    """插件专用：群聊事实、事件与证据提取；留空时自动继用 replyer 模型"""
++
++    plugin_daily_compose: TaskConfig = Field(
++        default_factory=TaskConfig,
++        json_schema_extra={
++            "x-widget": "custom",
++            "x-icon": "layers",
++            "advanced": True,
++        },
++    )
++    """插件专用：主要事件编排、压缩与去重；留空时自动继用 replyer 模型"""
++
++    plugin_daily_verify: TaskConfig = Field(
++        default_factory=TaskConfig,
++        json_schema_extra={
++            "x-widget": "custom",
++            "x-icon": "shield-check",
++            "advanced": True,
++        },
++    )
++    """插件专用：独立事实复核；留空时自动继用 replyer 模型"""
++
++    plugin_user_profile: TaskConfig = Field(
++        default_factory=TaskConfig,
++        json_schema_extra={
++            "x-widget": "custom",
++            "x-icon": "user-search",
++            "advanced": True,
++        },
++    )
++    """插件专用：事实型个人画像；留空时自动继用 replyer 模型"""
++
+diff --git a/src/llm_models/utils_model.py b/src/llm_models/utils_model.py
+index ea3d06e..843471e 100644
+--- a/src/llm_models/utils_model.py
++++ b/src/llm_models/utils_model.py
+@@ -76,0 +77,4 @@ EMPTY_TASK_FALLBACKS = {
++    "plugin_daily_extract": "replyer",
++    "plugin_daily_compose": "replyer",
++    "plugin_daily_verify": "replyer",
++    "plugin_user_profile": "replyer",
