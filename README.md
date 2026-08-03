@@ -112,7 +112,7 @@ admin_users = ["111111111"]
 [advanced]
 # 模型供应商和模型 ID 统一在 MaiBot 高级模型任务中配置，不在插件设置中重复填写。
 inject_memory = false
-llm_timeout_seconds = 60
+llm_timeout_seconds = 180
 render_timeout_seconds = 25
 group_timeout_seconds = 900
 event_chunk_messages = 120
@@ -281,7 +281,8 @@ python3 -m py_compile plugin.py core/analysis.py core/rendering.py core/event_di
 
 ## 参与维护
 
-提交改动前请阅读 [CONTRIBUTING.md](CONTRIBUTING.md)。仓库会在 Pull Request 和发布分支上自动运行
+提交改动前请阅读 [CONTRIBUTING.md](CONTRIBUTING.md)。使用支持见 [SUPPORT.md](SUPPORT.md)，
+正式发布步骤见 [docs/RELEASING.md](docs/RELEASING.md)。仓库会在 Pull Request 和主分支上自动运行
 Python 3.11/3.13 测试、增强安装器测试、语法检查、双包构建与 SHA256 校验；自动化只产出候选附件，
 不会自动创建正式 Release 或版本标签。
 

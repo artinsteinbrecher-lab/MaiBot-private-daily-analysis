@@ -210,10 +210,10 @@ class AdvancedSection(PluginConfigBase):
         },
     )
     llm_timeout_seconds: int = Field(
-        default=60,
+        default=180,
         description="单次 LLM 调用的最长等待时间（秒），到点放弃该次分析项。"
-        "注意：宿主对插件的单次能力调用约有 30 秒 RPC 硬上限，设置大于 30 通常不会有额外效果。",
-        json_schema_extra={"label": "LLM 调用超时（秒）", "hint": "默认 60；受宿主约 30 秒 RPC 上限约束"},
+        "插件会把该值传递给 MaiBot 的 cap.call RPC；增强任务建议保持低于宿主 240 秒硬上限。",
+        json_schema_extra={"label": "LLM 调用超时（秒）", "hint": "默认 180；增强任务宿主上限 240"},
     )
     render_timeout_seconds: int = Field(
         default=25,
@@ -237,7 +237,7 @@ class AdvancedSection(PluginConfigBase):
     )
     event_chunk_messages: int = Field(
         default=120,
-        description="每个事件提取分段最多包含的消息数；较小分段更容易在宿主30秒RPC限制内返回",
+        description="每个事件提取分段最多包含的消息数；较小分段更容易在单次模型等待时间内返回",
         json_schema_extra={"label": "每分段消息数", "hint": "推荐 120"},
     )
     event_chunk_characters: int = Field(
@@ -395,7 +395,7 @@ class DailyAnalysisPlugin(MaiBotPlugin):
             self._service.refine_model = routes["compose"]
             self._service.verify_model = routes["verify"]
             self._service.user_profile_model = routes["user_profile"]
-            self._service.call_timeout_s = max(5, int(self.config.advanced.llm_timeout_seconds or 60))
+            self._service.call_timeout_s = max(5, int(self.config.advanced.llm_timeout_seconds or 180))
             self._service.timezone_name = (
                 self.config.auto_summary.timezone or "Asia/Shanghai"
             )

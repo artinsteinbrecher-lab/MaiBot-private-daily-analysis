@@ -19,12 +19,17 @@ COMMON_FILES = (
     "LICENSE",
     "SECURITY.md",
 )
-COMMON_DIRS = ("core", "templates", "fonts", "tests")
+COMMON_DIRS = ("core", "templates", "fonts", "tests", "scripts")
 TEXT_SUFFIXES = {".py", ".md", ".toml", ".json", ".html", ".txt", ".patch"}
 RELEASE_IGNORE = shutil.ignore_patterns("__pycache__", "*.pyc", "*.pyo")
 SECRET_RE = re.compile(
     r"(?i)(api[_-]?key|access[_-]?token|secret[_-]?key|password|passwd)"
     r"\s*[:=]\s*[\"']?[A-Za-z0-9_./+\-=]{12,}"
+)
+SEMVER_RE = re.compile(
+    r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)"
+    r"(?:-[0-9A-Za-z]+(?:\.[0-9A-Za-z]+)*)?"
+    r"(?:\+[0-9A-Za-z]+(?:\.[0-9A-Za-z]+)*)?$"
 )
 
 
@@ -121,7 +126,7 @@ def write_core_comparison(rows: list[tuple[str, str]]) -> Path:
         "multimodel=khiqwq_daily_analysis_multimodel",
         "result=IDENTICAL",
         "algorithm=SHA256",
-        "scope=plugin.py,_manifest.json,CHANGELOG.md,LICENSE,SECURITY.md,core/,templates/,fonts/,tests/",
+        "scope=plugin.py,_manifest.json,CHANGELOG.md,LICENSE,SECURITY.md,core/,templates/,fonts/,tests/,scripts/",
         "note=README.md and config.example.toml intentionally differ; multimodel-only MODEL_ASSIGNMENT.md and extras/ are excluded.",
         "",
         "PATH|SHA256",
@@ -166,11 +171,16 @@ def write_checksums(paths: list[Path]) -> Path:
     return output
 
 
+def validate_version(value: object) -> str:
+    version = str(value or "").strip()
+    if not SEMVER_RE.fullmatch(version):
+        raise RuntimeError(f"manifest version is not valid SemVer: {version!r}")
+    return version
+
+
 def main() -> int:
     manifest = json.loads((ROOT / "_manifest.json").read_text(encoding="utf-8"))
-    version = str(manifest["version"])
-    if version != "3.6.0":
-        raise RuntimeError(f"expected release version 3.6.0, got {version}")
+    version = validate_version(manifest.get("version"))
     reset_dist()
     standard = build_variant("standard")
     multimodel = build_variant("multimodel")

@@ -17,10 +17,10 @@
 
 ## 本地验证
 
-建议使用 Python 3.11 或 3.13，并安装 Jinja2：
+建议使用 Python 3.11 或 3.13，并安装固定的开发依赖：
 
 ```bash
-python -m pip install --upgrade jinja2
+python -m pip install -r requirements-dev.txt
 python -m unittest discover -s tests -v
 python -m unittest discover -s extras/tests -v
 python -m py_compile plugin.py core/analysis.py core/constants.py core/event_digest.py core/rendering.py
@@ -52,6 +52,8 @@ sha256sum -c SHA256SUMS.txt
 3. 完成本地测试与双包构建。
 4. 在 PR 中说明变更目的、用户影响、验证结果和发布状态。
 5. 默认先提交 Draft PR；除非维护者明确决定，否则不要自动合并、创建标签或正式 Release。
+
+正式版本的检查、标签、附件与发布后验证见 `docs/RELEASING.md`。
 
 涉及发布包的变更还应确认：
 

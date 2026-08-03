@@ -2,10 +2,16 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from scripts.build_release import copy_entry, files_under
+from scripts.build_release import copy_entry, files_under, validate_version
 
 
 class ReleaseCopyTests(unittest.TestCase):
+    def test_manifest_version_must_be_semver(self):
+        self.assertEqual(validate_version("3.6.0"), "3.6.0")
+        self.assertEqual(validate_version("3.7.0-rc.1"), "3.7.0-rc.1")
+        with self.assertRaises(RuntimeError):
+            validate_version("release-3.6")
+
     def test_copy_entry_excludes_python_cache_files(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)

@@ -106,7 +106,7 @@ admin_users = ["111111111"]
 [advanced]
 # 应用增强补丁后，四个插件专用任务在 MaiBot 高级模型任务中分配。
 inject_memory = false
-llm_timeout_seconds = 60
+llm_timeout_seconds = 180
 render_timeout_seconds = 25
 group_timeout_seconds = 900
 event_chunk_messages = 120

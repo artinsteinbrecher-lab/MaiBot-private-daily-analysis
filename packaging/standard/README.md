@@ -103,7 +103,7 @@ admin_users = ["111111111"]
 [advanced]
 # 四个内部流程统一跟随 MaiBot 的 replyer；供应商与模型 ID 由 replyer 管理。
 inject_memory = false
-llm_timeout_seconds = 60
+llm_timeout_seconds = 180
 render_timeout_seconds = 25
 group_timeout_seconds = 900
 event_chunk_messages = 120

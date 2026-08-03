@@ -41,7 +41,7 @@ admin_users = ["111111111"]
 # plugin_daily_extract、plugin_daily_compose、plugin_daily_verify、plugin_user_profile。
 # 任一专用任务未配置时由 MaiBot 真实回退 replyer；未应用补丁时插件也统一跟随 replyer。
 inject_memory = false
-llm_timeout_seconds = 60
+llm_timeout_seconds = 180
 render_timeout_seconds = 25
 group_timeout_seconds = 900
 event_chunk_messages = 120

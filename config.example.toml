@@ -42,7 +42,7 @@ admin_users = ["111111111"]
 # plugin_daily_extract、plugin_daily_compose、plugin_daily_verify、plugin_user_profile。
 # 宿主未注册的专用任务固定跟随 replyer，插件基本功能仍可正常运行。
 inject_memory = false
-llm_timeout_seconds = 60
+llm_timeout_seconds = 180
 render_timeout_seconds = 25
 group_timeout_seconds = 900
 event_chunk_messages = 120

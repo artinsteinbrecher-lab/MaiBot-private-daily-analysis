@@ -30,8 +30,8 @@ from .event_digest import (
 
 
 # LLM 各任务的输出 token 上限。
-# 注意：SDK→宿主的能力调用 RPC 固定 30 秒超时，单次 LLM 必须在 30 秒内返回，
-# 因此适度限制输出长度，并由 MaiBot 任务路由选择满足时限的模型。
+# 通过 maibot_sdk 的 ``rpc_timeout_ms`` 参数把插件配置的等待时间传递到宿主，避免
+# 高质量模型仍被 cap.call 的默认 30 秒 RPC 上限提前切断；输出长度仍保持保守。
 _SUMMARY_MAX_TOKENS = 1200
 _JSON_MAX_TOKENS = 2500
 _EVENT_JSON_MAX_TOKENS = 3200
@@ -45,9 +45,10 @@ _EVENT_CANDIDATE_HARD_LIMIT = 1000
 # 并发 LLM 调用上限。设为 2：兼顾速度与"上游串行时排队不耗尽超时预算"。
 _LLM_MAX_CONCURRENCY = 2
 
-# 单次 LLM 调用的最长等待（秒），到点放弃该次分析项。注意：宿主对插件的单次能力调用
-# 约有 30 秒 RPC 硬上限，设大于 30 通常无额外效果；此值仅作客户端侧的等待上限。
-_DEFAULT_CALL_TIMEOUT_S = 60
+# 单次 LLM 调用的最长等待（秒），到点放弃该次分析项。增强任务的宿主硬上限为
+# 240 秒，因此默认保留 60 秒余量给 RPC 收尾、重试和单群整体超时控制。
+_DEFAULT_CALL_TIMEOUT_S = 180
+_RPC_TIMEOUT_GRACE_S = 5
 
 # 默认跟随 MaiBot replyer；仅当宿主实际注册专用任务时，插件加载过程才传入专用路由。
 _DEFAULT_MODEL_TASK = "replyer"
@@ -97,10 +98,9 @@ class AnalysisService:
         # 单次 LLM 调用的客户端等待上限（秒），可由插件配置覆盖
         self.call_timeout_s = max(5, int(call_timeout_s or _DEFAULT_CALL_TIMEOUT_S))
         self.timezone_name = timezone_name or "Asia/Shanghai"
-        # 限制并发 LLM 调用数：每个能力调用有约 30 秒 RPC 硬超时，若上游串行处理，
-        # 一次放出过多调用会让排队靠后的调用把等待时间算进自己的超时预算而被掐断。
-        # 信号量在"真正发起 ctx.llm.generate 之前"获取，确保每次调用的 30 秒计时
-        # 从有空闲槽位时才开始，避免排队耗尽预算。
+        # 限制并发 LLM 调用数：若上游串行处理，一次放出过多调用会让排队靠后的调用
+        # 把等待时间算进自己的超时预算。信号量在真正发起 ctx.llm.generate 前获取，
+        # 让每个调用的 RPC 预算从有空闲槽位时才开始。
         self._llm_semaphore = asyncio.Semaphore(_LLM_MAX_CONCURRENCY)
 
     # ==================== LLM 调用封装 ====================
@@ -123,8 +123,9 @@ class AnalysisService:
                         model=model_task or self.model,
                         temperature=temperature,
                         max_tokens=max_tokens,
+                        rpc_timeout_ms=self.call_timeout_s * 1000,
                     ),
-                    timeout=self.call_timeout_s,
+                    timeout=self.call_timeout_s + _RPC_TIMEOUT_GRACE_S,
                 )
         except asyncio.TimeoutError:
             self.logger.warning(f"LLM 调用超时 ({request_type}, >{self.call_timeout_s}s)")
@@ -1315,7 +1316,7 @@ class AnalysisService:
             merged = {"overview": "", "events": []}
         else:
             # 两种覆盖模式都使用本地确定性合并。第一阶段不再增加一次全局模型
-            # 合并调用，避免它成为新的 30 秒 RPC 超时点。
+            # 合并调用，避免额外模型请求成为新的超时点。
             merged = merge_event_reports_fallback(
                 reports,
                 max_events=_EVENT_CANDIDATE_HARD_LIMIT,

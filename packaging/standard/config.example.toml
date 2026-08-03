@@ -40,7 +40,7 @@ admin_users = ["111111111"]
 # 普通版不注册插件专用模型任务。四个内部 LLM 流程统一跟随 MaiBot replyer。
 # 供应商、URL、API Key 和模型 ID 均由 MaiBot 管理，不在插件配置中重复填写。
 inject_memory = false
-llm_timeout_seconds = 60
+llm_timeout_seconds = 180
 render_timeout_seconds = 25
 group_timeout_seconds = 900
 event_chunk_messages = 120

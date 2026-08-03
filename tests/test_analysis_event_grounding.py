@@ -66,6 +66,23 @@ class EventGroundingTests(unittest.TestCase):
         message_id = self.service._event_message_id(self.messages[0])
         self.assertIn(f"[09:30:20] [id={message_id}] 小明:", formatted)
 
+    def test_llm_timeout_is_forwarded_to_capability_rpc(self):
+        calls = []
+
+        class LLM:
+            async def generate(self, prompt, **kwargs):
+                calls.append((prompt, kwargs))
+                return {"success": True, "response": "ok"}
+
+        context = types.SimpleNamespace(logger=_Logger(), llm=LLM())
+        service = AnalysisService(context, call_timeout_s=180)
+        response = asyncio.run(
+            service._llm("test", request_type="timeout-forwarding")
+        )
+
+        self.assertEqual(response, "ok")
+        self.assertEqual(calls[0][1]["rpc_timeout_ms"], 180000)
+
     def test_claim_cannot_use_unrelated_real_evidence_id(self):
         message_id = self.service._event_message_id(self.messages[0])
         report = self.service._ground_event_report(
