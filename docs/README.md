@@ -1,39 +1,34 @@
-# 文档索引
+# 说明书入口
 
-按你的身份选择入口，不需要从头阅读全部文件。
+不用把所有文件都看一遍，找到自己需要的那一小段就好。
 
-## 普通版 v3.6.0
+## 普通用户：麦麦安静写书
 
-适合大多数用户，不修改 MaiBot，直接使用 MaiBot 当前的默认回复模型。
+这是仓库首先推荐给普通用户的版本。它会把群聊整理成日报，送到管理员私聊，也能让麦麦在指定群里保持安静。
 
-- [回到仓库首页选择下载](../README.md)
-- [阅读普通版完整说明](../packaging/standard/README.md)
+- [回到温柔一点的安装首页](../README.md)
+- [查看完整安装和注意事项](LEGACY_SILENCE.md)
+- [打开 v3.1.0 下载页](https://github.com/artinsteinbrecher-lab/MaiBot-private-daily-analysis/releases/tag/v3.1.0)
 
-## 增强版 v3.6.0
+## 如果遇到问题
 
-适合已经接入多个模型、愿意修改并重建 MaiBot 的用户。它可以给找事实、写日报、复查和人物画像分别选择模型。
+- [常见问题和检查方法](../SUPPORT.md)
+- [安全问题说明](../SECURITY.md)
 
-- [阅读增强版完整说明](../packaging/multimodel/README.md)
-- [阅读宿主修改说明](../extras/README.md)
+## 如果你在维护仓库
 
-## 经典禁言版 v3.1.0
+- [仓库是怎么组成的](ARCHITECTURE.md)
+- [改动前后的检查清单](REVIEW_CHECKLIST.md)
+- [整理新版本的方法](RELEASING.md)
+- [参与修改的说明](../CONTRIBUTING.md)
 
-这是禁言拆分前最后一个稳定版本，只推荐给必须把总结和禁言放在同一个插件里的用户。
+## 维护者自用的 v3.6.0
 
-- [下载、安装和风险说明](LEGACY_SILENCE.md)
-- [查看 v3.1.0 Release](https://github.com/artinsteinbrecher-lab/MaiBot-private-daily-analysis/releases/tag/v3.1.0)
+这是维护者自己使用的新版，重点是更细的日报整理和多模型分工，不再内置群聊禁言。普通用户安装“麦麦安静写书”时，可以先不用看这些内容。
 
-## 模型选型与验收
-
-- [MODEL_ASSIGNMENT.md](MODEL_ASSIGNMENT.md)：接入后的初始模型分配建议与真实性优先边界。
-- [EVALUATION.md](EVALUATION.md)：当前总结核心的能力矩阵和方案取舍。
-- [history/](history/)：带日期的历史评估记录，不代表永久有效的供应商配置。
-
-## 维护者
-
-- [ARCHITECTURE.md](ARCHITECTURE.md)：普通版与增强版如何共享同一核心。
-- [REVIEW_CHECKLIST.md](REVIEW_CHECKLIST.md)：候选版本审阅清单。
-- [RELEASING.md](RELEASING.md)：测试、构建、标签、附件与发布后复核。
-- [CONTRIBUTING.md](../CONTRIBUTING.md)：目录职责、变更约束和 Pull Request 要求。
-
-安全问题和使用支持分别见 [SECURITY.md](../SECURITY.md) 与 [SUPPORT.md](../SUPPORT.md)。
+- [普通包说明](../packaging/standard/README.md)
+- [多模型包说明](../packaging/multimodel/README.md)
+- [模型怎么分配](MODEL_ASSIGNMENT.md)
+- [效果检查方法](EVALUATION.md)
+- [历史评估记录](history/)
+- [MaiBot 修改说明](../extras/README.md)
