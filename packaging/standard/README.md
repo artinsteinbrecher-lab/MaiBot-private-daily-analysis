@@ -1,16 +1,12 @@
-# MaiBot 私聊群事件日报
+# MaiBot 私聊群事件日报（普通插件版）
 
 维护仓库：[khiqwq/Maibot_daily_analysis](https://github.com/khiqwq/Maibot_daily_analysis)
 
 适用于 MaiBot 1.x / `maibot_sdk` 2.x 的事实型群聊日报插件。它读取明确配置的 QQ 群白名单，生成带时间戳和回查锚点的
 事实型群事件日报，并且只将进度、结果和错误发送到管理员 QQ 私聊。
 
-## 下载选择
-
-- 普通用户：下载 Release 附件中的 `khiqwq_daily_analysis-vX.Y.Z-standard.zip`，只安装插件，不修改 MaiBot。
-- 多模型高级用户：下载 `khiqwq_daily_analysis-vX.Y.Z-multimodel.zip`，再按 `extras/README.md` 检查并应用四任务路由。
-- 两个安装包使用完全相同的总结核心；差异只在是否附带 MaiBot 高级模型任务路由工具。
-- GitHub 自动生成的 Source code 压缩包是完整源码快照，不等同于普通插件安装包。
+这是面向普通平台用户的开箱即用版本：只需安装插件，不修改 MaiBot 主程序。
+四个内部 LLM 流程统一使用 MaiBot 的 `replyer` 模型任务，插件不保存供应商、URL、API Key 或模型 ID。
 
 本插件不再承担群聊静默。需要绝对静默时，请独立安装“QQ 群绝对静默守卫”插件。
 拆分后，静默规则与日报的模型调用、数据库读取、图片渲染和启停状态互不依赖。
@@ -50,9 +46,7 @@
 仅执行以上步骤即可使用完整的群聊日报功能。默认情况下，四个需要 LLM 的流程都使用
 MaiBot 的 `replyer` 任务，不要求修改 MaiBot 主程序。
 
-如果希望在 MaiBot“高级模型任务”页面中分别给提取、编排、复核和个人画像指定模型，
-还需要应用仓库 `extras/maibot-plugin-task-routing.patch` 中的可选宿主补丁。官方 SDK
-目前没有让插件自行注册全局模型任务的接口，因此这一步不能由普通插件安装自动完成。
+普通版不包含宿主补丁，也不会在 MaiBot 高级模型任务页面新增插件专用任务。
 
 发布目录至少应包含：
 
@@ -62,7 +56,6 @@ _manifest.json
 core/
 templates/
 fonts/
-extras/  # 可选 MaiBot 高级模型任务补丁；只运行插件时不需要应用
 ```
 
 插件只声明 `jinja2>=3.1.0`，不需要单独安装 Playwright 或 Chromium。不要提交真实
@@ -108,7 +101,7 @@ recipient_user = "111111111"
 admin_users = ["111111111"]
 
 [advanced]
-# 模型供应商和模型 ID 统一在 MaiBot 高级模型任务中配置，不在插件设置中重复填写。
+# 四个内部流程统一跟随 MaiBot 的 replyer；供应商与模型 ID 由 replyer 管理。
 inject_memory = false
 llm_timeout_seconds = 60
 render_timeout_seconds = 25
@@ -126,13 +119,13 @@ split_chunk_on_failure = true
 - 未配置有效自动接收人时，自动任务不会读取群消息，也不会调用模型。
 - 多个管理员共用来源群白名单，但每次手动请求的进度与结果只发给发起账号。
 - 插件设置中不再出现模型任务、供应商或模型 ID 字段。
-- 未安装宿主补丁时，四个流程固定跟随 `replyer`，下载插件本身即可运行。
-- 安装可选宿主补丁后，模型只在 MaiBot 高级模型任务中分配；插件按固定任务名调用。
+- 四个内部流程固定跟随 `replyer`，下载插件本身即可运行。
+- 如需四任务独立模型分配，请改用单独整理的“多模型增强改包版”。
 - 没加入的群没有可用群聊流，会被标为空或不可用，不会阻塞其他群。
 
 ### 模型来源
 
-插件不新增供应商或模型 ID 配置。安装可选宿主补丁后，MaiBot 高级模型任务页面会出现：
+普通版不新增供应商、模型 ID 或 MaiBot 全局模型任务。插件内部仍按下列职责分阶段执行，但四个阶段都调用 `replyer`：
 
 ```text
 事实、事件、证据分片提取 → plugin_daily_extract
@@ -141,8 +134,8 @@ split_chunk_on_failure = true
 事实型个人画像 → plugin_user_profile
 ```
 
-宿主未注册任一专用任务时，该流程固定跟随 `replyer`；任务列表查询失败时，四个流程也全部安全回退到 `replyer`。应用配套宿主补丁后，四项即使在高级任务页面留空，也由 MaiBot 自身真实继承 `replyer`。
-升级插件不会修改模型列表、供应商、URL、Key 或模型 ID。
+这四个名称只是插件内部的职责标识，不会出现在普通版的 MaiBot 高级任务页面。
+升级插件不会修改 `replyer` 的模型列表、供应商、URL、Key 或模型 ID。
 
 ## 覆盖模式与完整性
 
@@ -252,8 +245,7 @@ python3 -m py_compile plugin.py core/analysis.py core/rendering.py core/event_di
 ### 私聊命令没有回应
 
 检查管理员私聊是否进入 MaiBot、账号是否在 `admin_users`、私聊会话是否能打开。
-若宿主没有注册专用模型任务，插件会固定跟随 `replyer`，不会因此阻止命令进入。
-已应用宿主补丁但专用任务留空时，则由 MaiBot 自身将该任务回退到 `replyer`。
+普通版的四个内部流程固定跟随 `replyer`；请确认 MaiBot 的 `replyer` 已配置可用模型。
 绝对静默守卫只匹配群聊，不应匹配管理员私聊。
 
 ### 配置了群但没有日报
