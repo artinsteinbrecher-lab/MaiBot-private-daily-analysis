@@ -1,15 +1,16 @@
-# MaiBot 私聊群事件日报（普通插件版）
+# 麦麦认真写书 · v3.6.0 标准版
 
 维护仓库：[artinsteinbrecher-lab/MaiBot-private-daily-analysis](https://github.com/artinsteinbrecher-lab/MaiBot-private-daily-analysis)
 
 当前安装包：`khiqwq_daily_analysis-v3.6.0-standard.zip` ·
-[查看正式 Release](https://github.com/artinsteinbrecher-lab/MaiBot-private-daily-analysis/releases/tag/v3.6.0)
+[查看正式 Release](https://github.com/artinsteinbrecher-lab/MaiBot-private-daily-analysis/releases/tag/v3.6.0) ·
+[返回版本与下载](../../docs/DOWNLOADS.md)
 
-这是推荐给大多数人的版本。它会把指定群里当天发生的事情整理成日报，并且只发给管理员私聊。
+这个版本专心把群聊里的事情写清楚。它会同时保留主要事件和普通事件，把日报只发给管理员私聊，并尽量核对时间、参与者、链接和引用。
 
 你不需要修改 MaiBot，也不需要另外配置四个模型任务。插件会使用 MaiBot 当前的默认回复模型。
 
-本插件不再承担群聊静默。需要绝对静默时，请独立安装“QQ 群绝对静默守卫”插件。
+本插件不再承担群聊静默。需要让麦麦在指定群里保持安静时，请搭配“麦麦群安静插件”。
 拆分后，静默规则与日报的模型调用、数据库读取、图片渲染和启停状态互不依赖。
 
 ## 它能做什么
@@ -131,7 +132,7 @@ split_chunk_on_failure = true
 - 多个管理员共用来源群白名单，但每次手动请求的进度与结果只发给发起账号。
 - 插件设置中不再出现模型任务、供应商或模型 ID 字段。
 - 四个内部流程固定跟随 `replyer`，下载插件本身即可运行。
-- 如需四任务独立模型分配，请改用单独整理的“多模型增强改包版”。
+- 如需四任务独立模型分配，请改用“麦麦一起写书”（v3.6.0 多模型版）。
 - 没加入的群没有可用群聊流，会被标为空或不可用，不会阻塞其他群。
 
 ### 模型来源
@@ -226,7 +227,7 @@ split_chunk_on_failure = true
 ## 独立绝对静默
 
 日报从 v3.2 起已移除 `[silence]` 配置和发送前 Hook。要让指定群绝对静默，请使用独立的
-“QQ 群绝对静默守卫”，并在守卫的群名单中填写目标群号。这样：
+“麦麦群安静插件”，并在安静名单中填写目标群号。这样：
 
 - 守卫只负责阻止名单内群聊的出站消息；
 - 日报仍可读取已入库消息并私聊发送结果；
@@ -257,7 +258,7 @@ python3 -m py_compile plugin.py core/analysis.py core/rendering.py core/event_di
 
 检查管理员私聊是否进入 MaiBot、账号是否在 `admin_users`、私聊会话是否能打开。
 普通版的四个内部流程固定跟随 `replyer`；请确认 MaiBot 的 `replyer` 已配置可用模型。
-绝对静默守卫只匹配群聊，不应匹配管理员私聊。
+麦麦群安静插件只匹配群聊，不应匹配管理员私聊。
 
 ### 配置了群但没有日报
 

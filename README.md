@@ -7,7 +7,8 @@
 这里提供的是 **麦麦安静写书 v3.1.0**。这是已经整理和检查过的禁言整合版。
 
 [下载“麦麦安静写书”](https://github.com/artinsteinbrecher-lab/MaiBot-private-daily-analysis/releases/download/v3.1.0/khiqwq_daily_analysis-v3.1.0-legacy-silence.zip) ·
-[打开下载页](https://github.com/artinsteinbrecher-lab/MaiBot-private-daily-analysis/releases/tag/v3.1.0)
+[打开下载页](https://github.com/artinsteinbrecher-lab/MaiBot-private-daily-analysis/releases/tag/v3.1.0) ·
+[查看三个版本](docs/DOWNLOADS.md)
 
 ## 它会帮你做什么
 
@@ -70,12 +71,9 @@
 
 如果只是想让麦麦安静地待在群里，不需要日报和个人总结，可以试试看从这个项目里分离出来的 **麦麦群安静插件**。它只负责安静，设置会更单纯。
 
-如果更在意总结效果，或者想让多个模型分别整理、写作和检查日报，可以看看 **麦麦最新改版插件 v3.6.0**。它的总结更细，但不再自带群聊禁言。
+如果更在意总结效果，可以看看 **麦麦认真写书**；如果还想让多个模型分工整理和复查，可以看看 **麦麦一起写书**。它们都使用 v3.6.0 的新版总结核心，但不再自带群聊禁言。
 
-[查看 v3.6.0 完整介绍与安装](docs/V3_6.md) ·
-[查看 v3.6.0](https://github.com/artinsteinbrecher-lab/MaiBot-private-daily-analysis/releases/tag/v3.6.0) ·
-[普通包](https://github.com/artinsteinbrecher-lab/MaiBot-private-daily-analysis/releases/download/v3.6.0/khiqwq_daily_analysis-v3.6.0-standard.zip) ·
-[多模型包](https://github.com/artinsteinbrecher-lab/MaiBot-private-daily-analysis/releases/download/v3.6.0/khiqwq_daily_analysis-v3.6.0-multimodel.zip)
+[查看三个版本的介绍、下载和安装](docs/DOWNLOADS.md)
 
 维护仓库：[artinsteinbrecher-lab/MaiBot-private-daily-analysis](https://github.com/artinsteinbrecher-lab/MaiBot-private-daily-analysis) ·
 [自动检查状态](https://github.com/artinsteinbrecher-lab/MaiBot-private-daily-analysis/actions/workflows/validate.yml)
