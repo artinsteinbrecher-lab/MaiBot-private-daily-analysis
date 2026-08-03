@@ -22,7 +22,7 @@ from typing import Any, Dict, List, Optional
 
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
-from .constants import AnalysisConfig
+from .event_digest import partition_events
 
 # 可选 HTTP 库：优先 httpx（MaiBot 主程序在用），其次 aiohttp。两者皆无则禁用预取。
 try:
@@ -362,17 +362,25 @@ class SummaryRenderer:
     ) -> List[str]:
         """把结构化事件日报渲染成一组适合 QQ 阅读的分页 PNG。"""
 
-        events = list(report.get("events") or [])
-        if not events:
+        major_events, _ = partition_events(report.get("events") or [])
+        if not major_events:
             return []
 
         page_size = max(1, min(8, int(events_per_page or 4)))
-        event_pages = [
-            events[index : index + page_size]
-            for index in range(0, len(events), page_size)
-        ]
+        section_pages = []
+        for index in range(0, len(major_events), page_size):
+            section_pages.append(
+                {
+                    "section_title": "主要事件",
+                    "section_kind": "major",
+                    "events": major_events[index : index + page_size],
+                    "event_offset": index,
+                }
+            )
+
+        coverage = report.get("coverage") or {}
         images: List[str] = []
-        for page_index, page_events in enumerate(event_pages, start=1):
+        for page_index, page in enumerate(section_pages, start=1):
             html_content = self._render_template(
                 "event_report_template.html",
                 group_name=group_name,
@@ -383,12 +391,21 @@ class SummaryRenderer:
                 analyzed_message_count=int(
                     report.get("analyzed_message_count") or message_count
                 ),
-                sampled=bool(report.get("sampled")),
+                sampled=bool(report.get("sampled")) if page_index == 1 else False,
+                partial=bool(report.get("partial")) if page_index == 1 else False,
+                coverage=coverage if page_index == 1 else {},
+                failed_ranges=(
+                    coverage.get("failed_ranges") or []
+                    if page_index == 1
+                    else []
+                ),
                 overview=str(report.get("overview") or "") if page_index == 1 else "",
-                events=page_events,
-                event_offset=(page_index - 1) * page_size,
+                section_title=page["section_title"],
+                section_kind=page["section_kind"],
+                events=page["events"],
+                event_offset=page["event_offset"],
                 page_index=page_index,
-                page_count=len(event_pages),
+                page_count=len(section_pages),
             )
             if not html_content:
                 self.logger.error(
@@ -400,230 +417,6 @@ class SummaryRenderer:
                 images.append(image_base64)
         return images
 
-    # ==================== 群聊总结图片 ====================
-
-    async def generate_summary_image(
-        self,
-        title: str,
-        summary_text: str,
-        time_info: str = "",
-        message_count: int = 0,
-        participant_count: int = 0,
-        emoji_count: Optional[int] = None,
-        total_characters: Optional[int] = None,
-        topics: Optional[list] = None,
-        user_titles: Optional[list] = None,
-        golden_quotes: Optional[list] = None,
-        depression_index: Optional[list] = None,
-        hourly_distribution: Optional[dict] = None,
-        display_order: Optional[list] = None,
-        target_date: Optional[datetime] = None,
-        max_depression_display: Optional[int] = None,
-        depression_show_bottom: Optional[bool] = None,
-        highlight_time: Optional[str] = None,
-    ) -> Optional[str]:
-        """生成群聊总结图片，返回 PNG 的 base64（失败返回 None）。"""
-        topics = topics or []
-        user_titles = user_titles or []
-        golden_quotes = golden_quotes or []
-        hourly_distribution = hourly_distribution or {}
-        if display_order is None:
-            display_order = ["24H", "Topics", "Portraits", "Quotes", "Rankings"]
-        if max_depression_display is None:
-            max_depression_display = AnalysisConfig.MAX_DEPRESSION_DISPLAY
-        if depression_show_bottom is None:
-            depression_show_bottom = AnalysisConfig.DEPRESSION_SHOW_BOTTOM_HALF
-
-        if target_date is None:
-            target_date = datetime.now()
-        current_date = target_date.strftime("%Y年%m月%d日")
-
-        # 优先使用传入的真实总字数；未提供时回退到总结文案长度
-        if total_characters is None:
-            total_characters = len(summary_text)
-        # 优先使用真实 emoji 统计；未提供时回退到按消息数估算
-        if emoji_count is None:
-            emoji_count = int(message_count * 0.1)
-
-        # Highlight Time：优先用传入的"最早消息→最晚消息"时间跨度；否则回退到最活跃时段
-        if highlight_time:
-            most_active_period = highlight_time
-        elif hourly_distribution:
-            max_hour = max(hourly_distribution, key=hourly_distribution.get)
-            most_active_period = f"{max_hour:02d}:00-{(max_hour + 1) % 24:02d}:00"
-        else:
-            most_active_period = "未知"
-
-        # ===== 24小时活跃图表 =====
-        hourly_chart_html = ""
-        if "24H" in display_order and hourly_distribution:
-            max_count = max(hourly_distribution.values()) if hourly_distribution.values() else 1
-            chart_data = []
-            for hour in range(24):
-                count = hourly_distribution.get(hour, 0)
-                percentage = int((count / max_count) * 100) if max_count > 0 else 0
-                chart_data.append({"hour": hour, "count": count, "percentage": percentage})
-            hourly_chart_html = self._render_template("activity_chart_section.html", chart_data=chart_data)
-
-        # ===== 话题列表 =====
-        topics_html = ""
-        if "Topics" in display_order and topics:
-            topic_list = []
-            for idx, topic_item in enumerate(topics[:5], start=1):
-                topic_data = topic_item.get("topic", "")
-                detail = topic_item.get("detail", "")
-                contributors = topic_item.get("contributors", [])
-                topic_dict = {"topic": topic_data, "detail": detail} if isinstance(topic_data, str) else topic_data
-                topic_list.append(
-                    {
-                        "index": idx,
-                        "topic": topic_dict,
-                        "detail": detail,
-                        "contributors": "、".join(contributors[:5]),
-                    }
-                )
-            topics_html = self._render_template("topic_item.html", topics=topic_list)
-
-        # ===== 群友画像 =====
-        portraits_html = ""
-        if "Portraits" in display_order and user_titles:
-            # 渲染前先把要用到的 QQ 头像预下载为 base64 data URL（离线内嵌，避免渲染联网超时）
-            avatar_qqs = [
-                str(t.get("user_id", "") or "")
-                for t in user_titles[:6]
-                if not t.get("avatar_data") and t.get("user_id")
-            ]
-            avatar_map = await prefetch_avatars(avatar_qqs, self.logger) if avatar_qqs else {}
-            title_list = []
-            for title_item in user_titles[:6]:
-                uid = str(title_item.get("user_id", "") or "")
-                # 优先用已有 avatar_data；否则用预取到的 base64 data URL；拿不到则置空走 SVG 占位
-                avatar_data = title_item.get("avatar_data", "") or avatar_map.get(uid, "")
-                title_list.append(
-                    {
-                        "name": title_item.get("name", ""),
-                        "title": title_item.get("title", ""),
-                        "mbti": title_item.get("mbti", ""),
-                        "reason": title_item.get("reason", ""),
-                        "avatar_data": avatar_data,
-                    }
-                )
-            portraits_html = self._render_template("user_title_item.html", titles=title_list)
-
-        # ===== 金句 =====
-        quotes_html = ""
-        if "Quotes" in display_order and golden_quotes:
-            quote_list = []
-            for quote_item in golden_quotes[:4]:
-                quote_list.append(
-                    {
-                        "content": quote_item.get("content", ""),
-                        "sender": quote_item.get("sender", ""),
-                        "reason": quote_item.get("reason", ""),
-                    }
-                )
-            quotes_html = self._render_template("quote_item.html", quotes=quote_list)
-
-        # ===== 炫压抑评级 =====
-        rankings_html = ""
-        if "Rankings" in display_order:
-            depression_rankings = self._build_depression_rankings(
-                depression_index or [], max_depression_display, depression_show_bottom
-            )
-            rankings_html = self._render_template(
-                "depression_index_item.html", depression_rankings=depression_rankings
-            )
-
-        # ===== 按 display_order 组装 =====
-        module_map = {
-            "24H": hourly_chart_html,
-            "Topics": topics_html,
-            "Portraits": portraits_html,
-            "Quotes": quotes_html,
-            "Rankings": rankings_html,
-        }
-        modules_html = "\n".join(
-            module_map[name] for name in display_order if module_map.get(name)
-        )
-
-        html_content = self._render_template(
-            "image_template.html",
-            current_date=current_date,
-            message_count=message_count,
-            participant_count=participant_count,
-            emoji_count=emoji_count,
-            total_characters=total_characters,
-            most_active_period=most_active_period,
-            modules_html=modules_html,
-        )
-        if not html_content:
-            self.logger.error("群聊总结主模板渲染为空")
-            return None
-
-        return await self._render_png_base64(html_content)
-
-    @staticmethod
-    def _build_depression_rankings(
-        depression_index: list, max_depression_display: int, depression_show_bottom: bool
-    ) -> List[Dict]:
-        """根据展示配置构建炫压抑评级渲染数据。"""
-        if not depression_index:
-            return []
-
-        total_count = len(depression_index)
-        rankings: List[Dict] = []
-
-        if total_count <= max_depression_display:
-            for i, entry in enumerate(depression_index, 1):
-                rankings.append(
-                    {
-                        "name": entry.get("name", ""),
-                        "rank": entry.get("rank", ""),
-                        "comment": entry.get("comment", ""),
-                        "position": i,
-                    }
-                )
-            return rankings
-
-        if depression_show_bottom:
-            # 正数优先：6→前3+后3, 7→前4+后3, 8→前4+后4
-            if max_depression_display % 2 == 0:
-                top_count = max_depression_display // 2
-                bottom_count = max_depression_display // 2
-            else:
-                top_count = max_depression_display // 2 + 1
-                bottom_count = max_depression_display // 2
-            for i, entry in enumerate(depression_index[:top_count], 1):
-                rankings.append(
-                    {
-                        "name": entry.get("name", ""),
-                        "rank": entry.get("rank", ""),
-                        "comment": entry.get("comment", ""),
-                        "position": i,
-                    }
-                )
-            bottom_entries = depression_index[-bottom_count:]
-            for i, entry in enumerate(bottom_entries, 1):
-                rankings.append(
-                    {
-                        "name": entry.get("name", ""),
-                        "rank": entry.get("rank", ""),
-                        "comment": entry.get("comment", ""),
-                        "position": f"倒{bottom_count - i + 1}",
-                    }
-                )
-        else:
-            for i, entry in enumerate(depression_index[:max_depression_display], 1):
-                rankings.append(
-                    {
-                        "name": entry.get("name", ""),
-                        "rank": entry.get("rank", ""),
-                        "comment": entry.get("comment", ""),
-                        "position": i,
-                    }
-                )
-        return rankings
-
     # ==================== 个人总结图片 ====================
 
     async def generate_user_summary_image(
@@ -634,21 +427,10 @@ class SummaryRenderer:
         message_count: int = 0,
         total_characters: int = 0,
         emoji_count: int = 0,
-        hourly_distribution: Optional[dict] = None,
-        user_title: str = "",
-        user_mbti: str = "",
         portrait_data: Optional[dict] = None,
-        depression_data: Optional[dict] = None,
-        golden_quotes: Optional[list] = None,
-        display_order: Optional[list] = None,
         target_date: Optional[datetime] = None,
     ) -> Optional[str]:
-        """生成个人总结图片，返回 PNG 的 base64（失败返回 None）。"""
-        hourly_distribution = hourly_distribution or {}
-        golden_quotes = golden_quotes or []
-        if display_order is None:
-            display_order = ["3H", "Portraits", "Rankings", "Quotes"]
-
+        """生成不含娱乐评级的事实型个人画像图片。"""
         if target_date is None:
             target_date = datetime.now()
         current_date = target_date.strftime("%Y年%m月%d日")
@@ -660,93 +442,19 @@ class SummaryRenderer:
             avatar_map = await prefetch_avatars([uid], self.logger)
             avatar_data = avatar_map.get(uid, "")
 
-        # ===== 3H 活跃轨迹 =====
-        activity_3h_html = ""
-        if "3H" in display_order and hourly_distribution:
-            max_hour = max(hourly_distribution, key=hourly_distribution.get)
-            max_count = hourly_distribution[max_hour]
-            prev_hour = (max_hour - 1) % 24
-            next_hour = (max_hour + 1) % 24
-
-            three_hours = [
-                {"time_label": f"{prev_hour:02d}:00-{max_hour:02d}:00", "count": hourly_distribution.get(prev_hour, 0), "percentage": 0},
-                {"time_label": f"{max_hour:02d}:00-{(max_hour + 1) % 24:02d}:00", "count": max_count, "percentage": 100},
-                {"time_label": f"{next_hour:02d}:00-{(next_hour + 1) % 24:02d}:00", "count": hourly_distribution.get(next_hour, 0), "percentage": 0},
-            ]
-            if max_count > 0:
-                three_hours[0]["percentage"] = int((three_hours[0]["count"] / max_count) * 100)
-                three_hours[2]["percentage"] = int((three_hours[2]["count"] / max_count) * 100)
-
-            activity_3h_html = self._render_template("user_3h_activity.html", chart_data=three_hours)
-
-        # 群友画像头像兜底
-        if portrait_data and not portrait_data.get("avatar_data"):
-            portrait_data["avatar_data"] = avatar_data
-
-        # 金句模块
-        quotes_html = ""
-        if golden_quotes:
-            quote_list = []
-            for quote_item in golden_quotes[:4]:
-                quote_list.append(
-                    {
-                        "content": quote_item.get("content", ""),
-                        "sender": user_name,
-                        "reason": quote_item.get("reason", ""),
-                    }
-                )
-            quotes_html = self._render_template("quote_item.html", quotes=quote_list)
-
-        # ===== 解析 display_order 动态组装 =====
-        modules_html_list = []
-        for order_item in display_order:
-            if "," in order_item:
-                # 组合模块：横向排列，每个 span 6
-                combined_html = ""
-                for module_name in (n.strip() for n in order_item.split(",")):
-                    if module_name == "Portraits" and portrait_data:
-                        combined_html += self._render_template(
-                            "user_portrait_module.html", portrait=portrait_data, grid_span=6
-                        )
-                    elif module_name == "Rankings" and depression_data:
-                        combined_html += self._render_template(
-                            "user_depression_module.html", depression=depression_data, grid_span=6
-                        )
-                if combined_html:
-                    modules_html_list.append(combined_html)
-            else:
-                module_name = order_item.strip()
-                if module_name == "3H":
-                    if activity_3h_html:
-                        modules_html_list.append(activity_3h_html)
-                elif module_name == "Portraits" and portrait_data:
-                    modules_html_list.append(
-                        self._render_template("user_portrait_module.html", portrait=portrait_data, grid_span=12)
-                    )
-                elif module_name == "Rankings" and depression_data:
-                    modules_html_list.append(
-                        self._render_template("user_depression_module.html", depression=depression_data, grid_span=12)
-                    )
-                elif module_name == "Quotes" and quotes_html:
-                    modules_html_list.append(quotes_html)
-
-        modules_html = "\n".join(modules_html_list)
-
-        # Quotes 完全由 display_order 控制显隐：不在列表中则不显示（不再做尾部强制兜底），
-        # 这样用户可以通过从 display_order 中移除 "Quotes" 来隐藏金句模块。
+        portrait_html = self._render_template(
+            "user_portrait_module.html", portrait=portrait_data or {}
+        )
         html_content = self._render_template(
             "user_summary_template.html",
             user_name=user_name,
             current_date=current_date,
             avatar_data=avatar_data,
-            user_title=user_title,
-            user_mbti=user_mbti,
             message_count=message_count,
             total_characters=total_characters,
             emoji_count=emoji_count,
             summary_text=summary_text,
-            modules_html=modules_html,
-            quotes_html="",
+            portrait_html=portrait_html,
         )
         if not html_content:
             self.logger.error("个人总结主模板渲染为空")

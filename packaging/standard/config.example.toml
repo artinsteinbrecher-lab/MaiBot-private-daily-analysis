@@ -37,10 +37,8 @@ recipient_user = "111111111"
 admin_users = ["111111111"]
 
 [advanced]
-# 模型供应商和模型 ID 不在插件中配置。官方 MaiBot 暂不允许插件动态注册
-# 全局模型任务；未安装配套宿主补丁时，以下四项不会出现在高级任务页面：
-# plugin_daily_extract、plugin_daily_compose、plugin_daily_verify、plugin_user_profile。
-# 宿主未注册的专用任务固定跟随 replyer，插件基本功能仍可正常运行。
+# 普通版不注册插件专用模型任务。四个内部 LLM 流程统一跟随 MaiBot replyer。
+# 供应商、URL、API Key 和模型 ID 均由 MaiBot 管理，不在插件配置中重复填写。
 inject_memory = false
 llm_timeout_seconds = 180
 render_timeout_seconds = 25

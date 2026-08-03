@@ -1,0 +1,58 @@
+name: Bug 报告
+description: 报告可复现的插件故障；提交前必须移除聊天内容和凭据。
+title: "[Bug] "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        请先确认正在使用受支持的 MaiBot、maibot_sdk 和插件版本。不要提交 QQ 号、群号、Token、API Key、服务器地址或原始聊天记录。
+  - type: input
+    id: plugin-version
+    attributes:
+      label: 插件版本
+      placeholder: 例如 3.6.0 standard
+    validations:
+      required: true
+  - type: input
+    id: maibot-version
+    attributes:
+      label: MaiBot 与 maibot_sdk 版本
+    validations:
+      required: true
+  - type: dropdown
+    id: package
+    attributes:
+      label: 安装包
+      options:
+        - standard
+        - multimodel
+        - 源码检出
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: 复现步骤
+      description: 使用占位符描述群号、账号和消息内容。
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: 预期与实际结果
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: 已脱敏日志
+      render: text
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: 隐私确认
+      options:
+        - label: 我已移除账号、群号、聊天文本、Token、API Key、服务器地址和其他个人信息。
+          required: true

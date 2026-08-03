@@ -30,3 +30,6 @@ config_back/
 
 # 生成的图片文件
 data_GeneratePicture/
+
+# 本地发布构建产物
+dist/

@@ -41,34 +41,14 @@ def _load_plugin_module():
         def __call__(self, function):
             return function
 
-    class HookHandler(Command):
-        pass
-
     def Field(*, default=None, default_factory=None, **kwargs):
         return default_factory() if default_factory is not None else default
 
     sdk.MaiBotPlugin = MaiBotPlugin
     sdk.PluginConfigBase = PluginConfigBase
     sdk.Command = Command
-    sdk.HookHandler = HookHandler
     sdk.Field = Field
     sys.modules["maibot_sdk"] = sdk
-
-    sdk_types = types.ModuleType("maibot_sdk.types")
-
-    class ErrorPolicy:
-        ABORT = "abort"
-
-    class HookMode:
-        BLOCKING = "blocking"
-
-    class HookOrder:
-        EARLY = "early"
-
-    sdk_types.ErrorPolicy = ErrorPolicy
-    sdk_types.HookMode = HookMode
-    sdk_types.HookOrder = HookOrder
-    sys.modules["maibot_sdk.types"] = sdk_types
 
     root = Path(__file__).resolve().parents[1]
     package_name = "daily_analysis_plugin_under_test"
@@ -123,85 +103,196 @@ class PluginRoutingTests(unittest.TestCase):
         recipient="",
         admins=None,
         groups=None,
-        silence_enabled=False,
-        silent_groups=None,
     ):
         plugin = object.__new__(DailyAnalysisPlugin)
-        plugin.ctx = SimpleNamespace(logger=_Logger(), send=_Send())
+        plugin.ctx = SimpleNamespace(logger=_Logger(), send=_Send(), llm=None)
         plugin.config = SimpleNamespace(
             plugin=SimpleNamespace(enabled=True),
             auto_summary=SimpleNamespace(
                 recipient_user=recipient,
                 target_chats=groups or [],
             ),
-            silence=SimpleNamespace(
-                enabled=silence_enabled,
-                target_chats=silent_groups or [],
-            ),
             command_permission=SimpleNamespace(admin_users=admins or []),
+            advanced=SimpleNamespace(model_task="legacy-task"),
         )
         return plugin
 
-    def test_silent_group_blocks_outbound_message(self):
-        plugin = self._plugin(
-            groups=["20001", "20002"],
-            silence_enabled=True,
-            silent_groups=["20001"],
-        )
-        result = asyncio.run(
-            DailyAnalysisPlugin.guard_silent_group_send(
-                plugin,
-                message={
-                    "message_info": {
-                        "group_info": {"group_id": "20001", "group_name": "静默群"}
-                    }
-                },
-            )
-        )
-        self.assertEqual(result, {"action": "abort"})
+    def test_fixed_plugin_tasks_are_used_when_available(self):
+        plugin = self._plugin()
 
-    def test_silent_group_allows_private_and_other_groups(self):
-        plugin = self._plugin(
-            groups=["20001", "20002"],
-            silence_enabled=True,
-            silent_groups=["20001"],
-        )
-        private_result = asyncio.run(
-            DailyAnalysisPlugin.guard_silent_group_send(
-                plugin,
-                message={"message_info": {"group_info": None}},
-            )
-        )
-        other_group_result = asyncio.run(
-            DailyAnalysisPlugin.guard_silent_group_send(
-                plugin,
-                message={
-                    "message_info": {
-                        "group_info": {"group_id": "20002", "group_name": "正常群"}
-                    }
-                },
-            )
-        )
-        self.assertEqual(private_result, {"action": "continue"})
-        self.assertEqual(other_group_result, {"action": "continue"})
+        class LLM:
+            async def get_available_models(self):
+                return [
+                    "replyer",
+                    "plugin_daily_extract",
+                    "plugin_daily_compose",
+                    "plugin_daily_verify",
+                    "plugin_user_profile",
+                ]
 
-    def test_silent_group_must_also_be_summary_source(self):
-        plugin = self._plugin(
-            groups=["20002"],
-            silence_enabled=True,
-            silent_groups=["20001"],
+        plugin.ctx.llm = LLM()
+        routes = asyncio.run(DailyAnalysisPlugin._resolve_plugin_tasks(plugin))
+        self.assertEqual(
+            routes,
+            {
+                "main": "replyer",
+                "extract": "plugin_daily_extract",
+                "compose": "plugin_daily_compose",
+                "verify": "plugin_daily_verify",
+                "user_profile": "plugin_user_profile",
+            },
         )
-        result = asyncio.run(
-            DailyAnalysisPlugin.guard_silent_group_send(
-                plugin,
-                message={
-                    "message_info": {
-                        "group_info": {"group_id": "20001", "group_name": "非来源群"}
-                    }
+
+    def test_missing_plugin_tasks_follow_replyer(self):
+        plugin = self._plugin()
+
+        class LLM:
+            async def get_available_models(self):
+                return ["utils", "replyer"]
+
+        plugin.ctx.llm = LLM()
+        routes = asyncio.run(DailyAnalysisPlugin._resolve_plugin_tasks(plugin))
+        self.assertEqual(set(routes.values()), {"replyer"})
+
+    def test_missing_replyer_does_not_select_utils_as_a_substitute(self):
+        plugin = self._plugin()
+
+        class LLM:
+            async def get_available_models(self):
+                return ["utils"]
+
+        plugin.ctx.llm = LLM()
+        routes = asyncio.run(DailyAnalysisPlugin._resolve_plugin_tasks(plugin))
+        self.assertEqual(set(routes.values()), {"replyer"})
+
+    def test_missing_main_task_does_not_select_first_available_task(self):
+        plugin = self._plugin()
+
+        class LLM:
+            async def get_available_models(self):
+                return ["custom-main", "backup"]
+
+        plugin.ctx.llm = LLM()
+        routes = asyncio.run(DailyAnalysisPlugin._resolve_plugin_tasks(plugin))
+        self.assertEqual(set(routes.values()), {"replyer"})
+
+    def test_empty_task_list_follows_replyer(self):
+        plugin = self._plugin()
+        plugin.ctx.llm = SimpleNamespace(get_available_models=lambda: asyncio.sleep(0, result=[]))
+        routes = asyncio.run(DailyAnalysisPlugin._resolve_plugin_tasks(plugin))
+        self.assertEqual(set(routes.values()), {"replyer"})
+
+    def test_legacy_rpc_wrapper_is_supported(self):
+        plugin = self._plugin()
+        plugin.ctx.llm = SimpleNamespace(
+            get_available_models=lambda: asyncio.sleep(
+                0,
+                result={
+                    "models": [
+                        "replyer",
+                        "plugin_daily_extract",
+                        "plugin_user_profile",
+                    ]
                 },
+            ),
+        )
+        routes = asyncio.run(DailyAnalysisPlugin._resolve_plugin_tasks(plugin))
+        self.assertEqual(routes["extract"], "plugin_daily_extract")
+        self.assertEqual(routes["compose"], "replyer")
+        self.assertEqual(routes["verify"], "replyer")
+        self.assertEqual(routes["user_profile"], "plugin_user_profile")
+
+    def test_non_sdk_metadata_is_not_treated_as_registered_tasks(self):
+        plugin = self._plugin()
+
+        class LLM:
+            async def get_available_models(self):
+                return {
+                    "models": [
+                        {"task": "plugin_daily_extract"},
+                        {"name": "plugin_daily_compose"},
+                    ]
+                }
+
+        plugin.ctx.llm = LLM()
+        routes = asyncio.run(DailyAnalysisPlugin._resolve_plugin_tasks(plugin))
+        self.assertEqual(set(routes.values()), {"replyer"})
+
+    def test_task_lookup_failure_safely_follows_replyer(self):
+        plugin = self._plugin()
+
+        class LLM:
+            async def get_available_models(self):
+                raise RuntimeError("unavailable")
+
+        plugin.ctx.llm = LLM()
+        routes = asyncio.run(DailyAnalysisPlugin._resolve_plugin_tasks(plugin))
+        self.assertEqual(set(routes.values()), {"replyer"})
+
+    def test_legacy_model_fields_are_removed_from_webui_schema(self):
+        base = plugin_module.MaiBotPlugin
+        original = getattr(base, "get_webui_config_schema", None)
+        base.get_webui_config_schema = lambda self, **kwargs: {
+            "properties": {
+                "advanced": {
+                    "properties": {
+                        "model_task": {},
+                        "topic_scan_task": {},
+                        "event_refine_task": {},
+                        "llm_timeout_seconds": {},
+                    }
+                }
+            },
+            "sections": {},
+        }
+        try:
+            plugin = self._plugin()
+            schema = DailyAnalysisPlugin.get_webui_config_schema(plugin)
+        finally:
+            if original is None:
+                delattr(base, "get_webui_config_schema")
+            else:
+                base.get_webui_config_schema = original
+        advanced = schema["properties"]["advanced"]["properties"]
+        self.assertNotIn("model_task", advanced)
+        self.assertNotIn("topic_scan_task", advanced)
+        self.assertNotIn("event_refine_task", advanced)
+        self.assertIn("llm_timeout_seconds", advanced)
+
+    def test_user_summary_only_runs_fact_portrait(self):
+        plugin = self._plugin()
+        calls = []
+
+        class Service:
+            def analyze_single_user_stats(self, messages):
+                return {"message_count": 2, "char_count": 12, "emoji_count": 0}
+
+            async def analyze_single_user_portrait(self, messages, user_name, user_id):
+                calls.append((user_name, user_id))
+                return {"summary": "事实型概览", "evidence_points": []}
+
+        class Renderer:
+            async def generate_user_summary_image(self, **kwargs):
+                calls.append(kwargs)
+                return "image-base64"
+
+        plugin._service = Service()
+        plugin._renderer = Renderer()
+        image, summary = asyncio.run(
+            DailyAnalysisPlugin._build_user_summary_image(
+                plugin,
+                [{"processed_plain_text": "测试"}],
+                "小明",
+                "10001",
+                datetime(2026, 8, 2),
             )
         )
-        self.assertEqual(result, {"action": "continue"})
+        self.assertEqual(image, "image-base64")
+        self.assertEqual(summary, "事实型概览")
+        self.assertEqual(calls[0], ("小明", "10001"))
+        self.assertNotIn("depression_data", calls[1])
+        self.assertNotIn("golden_quotes", calls[1])
+        self.assertNotIn("display_order", calls[1])
 
     def test_group_summary_command_never_sends_to_group(self):
         plugin = self._plugin(admins=["10001"], groups=["20001"])
@@ -283,6 +374,236 @@ class PluginRoutingTests(unittest.TestCase):
             datetime(2026, 7, 29, 0, 0),
         )
         self.assertEqual(plugin.ctx.send.calls, [])
+
+    def test_partial_report_without_events_keeps_partial_status(self):
+        plugin = self._plugin()
+        plugin.config.summary = SimpleNamespace(
+            coverage_mode="完整覆盖",
+            detail_level="完整",
+            max_events=12,
+            max_minor_events=30,
+            anchors_per_event=2,
+            include_anchor_quotes=True,
+            max_input_messages=1200,
+            include_links=True,
+        )
+        plugin.config.advanced = SimpleNamespace(
+            event_chunk_messages=120,
+            event_chunk_characters=8000,
+            event_retry_count=2,
+            split_chunk_on_failure=True,
+        )
+
+        async def get_messages(*args):
+            return [
+                {
+                    "processed_plain_text": "一条有效消息",
+                    "time": 1.0,
+                }
+            ]
+
+        class Service:
+            async def analyze_group_event_report(self, messages, **kwargs):
+                return {
+                    "overview": "",
+                    "events": [],
+                    "partial": True,
+                    "coverage": {
+                        "total_messages": 1,
+                        "analyzed_messages": 0,
+                        "coverage_percent": 0.0,
+                        "failed_ranges": [
+                            {
+                                "start_time": "00:00",
+                                "end_time": "00:00",
+                                "message_count": 1,
+                            }
+                        ],
+                    },
+                }
+
+        plugin._get_messages = get_messages
+        plugin._service = Service()
+        result = asyncio.run(
+            DailyAnalysisPlugin._analyze_event_group(
+                plugin,
+                {
+                    "group_id": "20001",
+                    "group_name": "来源群",
+                    "stream_id": "source-stream",
+                },
+                0,
+                2,
+                1,
+            )
+        )
+        self.assertEqual(result["status"], "partial")
+        self.assertEqual(result["report"]["events"], [])
+
+    def test_minor_only_report_is_sent_as_text_without_image_rendering(self):
+        plugin = self._plugin()
+        plugin.config.auto_summary.min_messages = 1
+        plugin.config.summary = SimpleNamespace(events_per_page=4)
+        plugin.config.advanced = SimpleNamespace(
+            group_timeout_seconds=60,
+            inject_memory=False,
+        )
+
+        async def analyze(meta, *args):
+            return {
+                **meta,
+                "status": "ok",
+                "message_count": 20,
+                "report": {
+                    "overview": "普通话题概览",
+                    "events": [
+                        {
+                            "importance": "minor",
+                            "start_time": "09:00",
+                            "end_time": "09:15",
+                            "title": "讨论部署方式",
+                            "summary": "简单交流了 Docker 配置。",
+                            "outcomes": [],
+                            "pending": [],
+                            "participants": [],
+                            "anchors": [],
+                            "links": [],
+                        }
+                    ],
+                    "coverage": {
+                        "total_messages": 20,
+                        "analyzed_messages": 20,
+                        "coverage_percent": 100.0,
+                    },
+                    "refinement": {
+                        "requested": 0,
+                        "refined": 0,
+                        "fallback": 0,
+                    },
+                },
+            }
+
+        class Renderer:
+            async def generate_event_report_images(self, **kwargs):
+                raise AssertionError("普通话题不应进入图片渲染")
+
+        plugin._analyze_event_group = analyze
+        plugin._renderer = Renderer()
+        results = asyncio.run(
+            DailyAnalysisPlugin._deliver_event_reports(
+                plugin,
+                "private-stream",
+                [
+                    {
+                        "group_id": "20001",
+                        "group_name": "来源群",
+                        "stream_id": "source-stream",
+                    }
+                ],
+                start_ts=0,
+                end_ts=1,
+                report_date=datetime(2026, 7, 30),
+                period_text="2026-07-30 00:00—2026-07-30 23:59",
+                request_label="测试日报",
+            )
+        )
+        self.assertEqual(results[0]["status"], "ok")
+        self.assertFalse(
+            any(call[0] == "image" for call in plugin.ctx.send.calls)
+        )
+        sent_text = "\n".join(
+            call[2] for call in plugin.ctx.send.calls if call[0] == "text"
+        )
+        self.assertIn("其他话题时间线", sent_text)
+        self.assertIn("09:00—09:15｜讨论部署方式", sent_text)
+
+
+    def test_image_send_failure_falls_back_to_major_text(self):
+        plugin = self._plugin()
+        plugin.config.auto_summary.min_messages = 1
+        plugin.config.summary = SimpleNamespace(events_per_page=4)
+        plugin.config.advanced = SimpleNamespace(
+            group_timeout_seconds=60,
+            inject_memory=False,
+        )
+
+        async def analyze(meta, *args):
+            return {
+                **meta,
+                "status": "ok",
+                "message_count": 30,
+                "report": {
+                    "overview": "主要事件概览",
+                    "events": [
+                        {
+                            "importance": "major",
+                            "start_time": "10:00",
+                            "end_time": "10:30",
+                            "title": "处理接口故障",
+                            "summary": "群友排查并恢复了接口。",
+                            "outcomes": ["接口恢复"],
+                            "pending": [],
+                            "participants": ["群友"],
+                            "anchors": [
+                                {
+                                    "time": "10:20",
+                                    "speaker": "群友",
+                                    "quote": "现在恢复了",
+                                }
+                            ],
+                            "links": [],
+                        }
+                    ],
+                    "coverage": {
+                        "total_messages": 30,
+                        "analyzed_messages": 30,
+                        "coverage_percent": 100.0,
+                    },
+                    "refinement": {
+                        "requested": 1,
+                        "refined": 1,
+                        "fallback": 0,
+                    },
+                },
+            }
+
+        class Renderer:
+            async def generate_event_report_images(self, **kwargs):
+                return ["image-base64"]
+
+        async def uncertain_image(image, stream_id):
+            plugin.ctx.send.calls.append(("image", stream_id, image))
+            return False
+
+        plugin._analyze_event_group = analyze
+        plugin._renderer = Renderer()
+        plugin.ctx.send.image = uncertain_image
+        results = asyncio.run(
+            DailyAnalysisPlugin._deliver_event_reports(
+                plugin,
+                "private-stream",
+                [
+                    {
+                        "group_id": "20001",
+                        "group_name": "来源群",
+                        "stream_id": "source-stream",
+                    }
+                ],
+                start_ts=0,
+                end_ts=1,
+                report_date=datetime(2026, 7, 31),
+                period_text="2026-07-31 00:00—2026-07-31 23:59",
+                request_label="测试日报",
+            )
+        )
+        self.assertEqual(results[0]["status"], "partial")
+        sent_text = "\n".join(
+            call[2] for call in plugin.ctx.send.calls if call[0] == "text"
+        )
+        self.assertIn("补发可搜索文字版", sent_text)
+        self.assertIn("处理接口故障", sent_text)
+        self.assertIn("部分完成 1 个", sent_text)
+        self.assertIn("失败 0 个", sent_text)
 
 
 if __name__ == "__main__":

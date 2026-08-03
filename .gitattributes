@@ -7,3 +7,4 @@
 *.html text eol=lf
 
 *.woff2 binary
+*.zip binary

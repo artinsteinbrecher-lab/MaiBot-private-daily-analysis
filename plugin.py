@@ -2,8 +2,8 @@
 
 ``/summary`` 仅接受管理员 QQ 私聊，用于总结一个来源群或全部白名单群；
 定时任务在次日生成前一个完整自然日的报告。进度和结果只发送到目标私聊，
-事件日报不会向来源群发送内容。还可通过“绝对静默”名单阻止指定来源群的
-所有出站消息；原版 ``/mysummary`` 个人总结功能继续保留。
+事件日报不会向来源群发送内容。绝对静默由独立的 QQ群绝对静默守卫插件负责；
+原版 ``/mysummary`` 个人总结功能继续保留。
 
 所有宿主能力通过官方 ``ctx.*`` API 调用，图片由 ``render.html2png`` 渲染。
 """
@@ -12,51 +12,27 @@ import asyncio
 from datetime import date, datetime, timedelta
 from typing import Any, Dict, List, Literal, Optional, Tuple
 
-from maibot_sdk import Command, Field, HookHandler, MaiBotPlugin, PluginConfigBase
-from maibot_sdk.types import ErrorPolicy, HookMode, HookOrder
+from maibot_sdk import Command, Field, MaiBotPlugin, PluginConfigBase
 
 from .core import AnalysisService, SummaryRenderer
 from .core.event_digest import (
     build_daily_index_text,
     build_event_plain_text,
+    build_minor_topic_timeline_pages,
     parse_summary_command,
     split_message_text,
 )
 
 
-# ==================== 模块选项（WebUI 中文下拉）====================
-
-# 个人总结可选模块；额外提供"并排"组合项以保留横向并排能力
-PersonalModuleOption = Literal[
-    "无", "3H活跃轨迹", "群友画像", "炫压抑评级", "语出惊人", "群友画像+炫压抑评级(并排)"
-]
-
-_PERSONAL_MODULE_MAP = {
-    "3H活跃轨迹": "3H",
-    "群友画像": "Portraits",
-    "炫压抑评级": "Rankings",
-    "语出惊人": "Quotes",
-    "群友画像+炫压抑评级(并排)": "Portraits,Rankings",
-}
-
-def _slots_to_display_order(slots, mapping: dict) -> List[str]:
-    """把若干下拉槽位（中文模块名，"无"表示不显示）按顺序转成渲染器用的代码列表，按模块去重。
-
-    组合项（如 "Portraits,Rankings"）按其成员逐个去重：若某成员已在前面出现过，则跳过该槽位，
-    避免同一模块在"独立"和"并排"中重复渲染。
-    """
-    order: List[str] = []
-    seen = set()
-    for slot in slots:
-        code = mapping.get(slot)
-        if not code:
-            continue
-        members = code.split(",")
-        if any(member in seen for member in members):
-            continue
-        seen.update(members)
-        order.append(code)
-    return order
+# 插件只引用宿主实际存在的 MaiBot 高级模型任务，不在插件配置页重复配置
+# 供应商或模型 ID。官方 SDK 暂不支持插件动态注册全局任务；未安装配套的
+# MaiBot 兼容补丁时，这四个任务不会出现在模型分配页，插件会统一跟随 replyer。
+_PLUGIN_EXTRACT_TASK = "plugin_daily_extract"
+_PLUGIN_COMPOSE_TASK = "plugin_daily_compose"
+_PLUGIN_VERIFY_TASK = "plugin_daily_verify"
+_PLUGIN_USER_PROFILE_TASK = "plugin_user_profile"
+_MAIN_MODEL_TASK = "replyer"
+_LEGACY_MODEL_FIELDS = {"model_task", "topic_scan_task", "event_refine_task"}
 
 
 # ==================== 配置模型 ====================
@@ -72,7 +48,7 @@ class PluginSection(PluginConfigBase):
         json_schema_extra={"label": "启用插件"},
     )
     config_version: str = Field(
-        default="3.1.0",
+        default="3.6.0",
         description="配置文件版本，用于兼容性校验，请勿手动修改",
         json_schema_extra={"label": "配置版本", "disabled": True},
     )
@@ -82,10 +58,36 @@ class SummarySection(PluginConfigBase):
     __ui_label__ = "事件日报"
     __ui_icon__ = "file-text"
     __ui_order__ = 1
+    coverage_mode: Literal["均衡抽样", "完整覆盖"] = Field(
+        default="完整覆盖",
+        description="均衡抽样适合低成本快速日报；完整覆盖会分段分析统计范围内的全部有效文本消息",
+        json_schema_extra={
+            "label": "消息覆盖模式",
+            "hint": "高流量群需要尽量完整时选择“完整覆盖”",
+        },
+    )
+    detail_level: Literal["精简", "标准", "完整"] = Field(
+        default="完整",
+        description="控制哪些聊天内容会被记录为事件；完整模式会保留较小但有实际内容的动态",
+        json_schema_extra={"label": "日报详细程度"},
+    )
     max_events: int = Field(
-        default=8,
-        description="每个群最多展示的主要事件数量；普通寒暄、复读和表情刷屏会被忽略",
-        json_schema_extra={"label": "每群最多事件数", "hint": "推荐 8"},
+        default=12,
+        description="每个群最多展示的主要事件数量",
+        json_schema_extra={"label": "每群主要事件数", "hint": "推荐 12"},
+    )
+    max_minor_events: int = Field(
+        default=0,
+        description="普通话题的独立上限；0 表示不设用户上限（仍有500条安全上限），不占主要事件名额",
+        json_schema_extra={
+            "label": "普通话题上限",
+            "hint": "推荐 0；普通话题采用简略文本时间线",
+        },
+    )
+    refine_major_events: bool = Field(
+        default=True,
+        description="完成全量话题索引后，仅对主要事件读取原消息并生成详细记录；失败时保留简略版本",
+        json_schema_extra={"label": "详细精炼主要事件"},
     )
     anchors_per_event: int = Field(
         default=2,
@@ -99,8 +101,8 @@ class SummarySection(PluginConfigBase):
     )
     max_input_messages: int = Field(
         default=1200,
-        description="单群单次最多用于分析的消息数；高流量群超过后按全天时段均衡抽样",
-        json_schema_extra={"label": "每群最大分析消息数", "hint": "推荐 1200"},
+        description="仅用于均衡抽样模式；完整覆盖模式不使用此上限",
+        json_schema_extra={"label": "抽样模式消息上限", "hint": "推荐 1200"},
     )
     include_anchor_quotes: bool = Field(
         default=True,
@@ -135,27 +137,6 @@ class UserSummarySection(PluginConfigBase):
             "label": "查看他人名单",
             "hint": "为空时所有人都能查看他人；白名单=仅名单内可看他人；黑名单=名单内禁止看他人",
         },
-    )
-    # 4 个下拉槽位，按槽位顺序显示；选"无"隐藏；含"并排"组合项
-    slot_1: PersonalModuleOption = Field(
-        default="3H活跃轨迹",
-        description="第 1 个显示的模块（选『无』则此位置不显示）",
-        json_schema_extra={"label": "显示模块 1"},
-    )
-    slot_2: PersonalModuleOption = Field(
-        default="群友画像+炫压抑评级(并排)",
-        description="第 2 个显示的模块（『…并排』表示两个模块横向并排）",
-        json_schema_extra={"label": "显示模块 2"},
-    )
-    slot_3: PersonalModuleOption = Field(
-        default="语出惊人",
-        description="第 3 个显示的模块",
-        json_schema_extra={"label": "显示模块 3"},
-    )
-    slot_4: PersonalModuleOption = Field(
-        default="无",
-        description="第 4 个显示的模块",
-        json_schema_extra={"label": "显示模块 4"},
     )
 
 
@@ -195,30 +176,10 @@ class AutoSummarySection(PluginConfigBase):
     )
 
 
-class SilenceSection(PluginConfigBase):
-    __ui_label__ = "绝对静默"
-    __ui_icon__ = "volume-x"
-    __ui_order__ = 4
-    enabled: bool = Field(
-        default=False,
-        description="开启后，在真正发送到 QQ 前拦截静默名单群的所有出站消息；"
-        "消息接收、入库和日报生成不受影响",
-        json_schema_extra={"label": "启用绝对静默"},
-    )
-    target_chats: List[str] = Field(
-        default_factory=list,
-        description="需要绝对静默的 QQ 群号；只有同时存在于“允许总结的群聊”中的群号才生效",
-        json_schema_extra={
-            "label": "绝对静默群聊",
-            "hint": "阻止普通回复、@回复、昵称触发、命令和其他插件向这些群发送消息",
-        },
-    )
-
-
 class CommandPermissionSection(PluginConfigBase):
     __ui_label__ = "管理员账号"
     __ui_icon__ = "shield"
-    __ui_order__ = 5
+    __ui_order__ = 4
     admin_users: List[str] = Field(
         default_factory=list,
         description="允许私聊执行 /summary 的管理员 QQ；不同账号的请求和结果彼此独立",
@@ -229,15 +190,14 @@ class CommandPermissionSection(PluginConfigBase):
 class AdvancedSection(PluginConfigBase):
     __ui_label__ = "高级"
     __ui_icon__ = "settings"
-    __ui_order__ = 6
+    __ui_order__ = 5
     model_task: str = Field(
         default="utils",
-        description="生成总结/分析使用的【模型任务名】。该任务内配置的模型会按其 model_list 随机/轮询使用。"
-        "建议 utils 或 planner（通常是快速非思考模型）；replyer 是主回复模型，可能较慢、需配合调大 LLM 超时。",
+        description="旧版兼容字段；新版由 MaiBot 高级任务统一分配。",
         json_schema_extra={
-            "label": "模型任务",
-            "hint": "填 MaiBot 的【任务名】(如 utils / planner / replyer / memory)，不是模型名；"
-            "想指定具体模型请在 MaiBot 的 model_config.toml 改该任务的 model_list。填错会自动回退 utils。",
+            "label": "旧版模型任务",
+            "hidden": True,
+            "deprecated": True,
         },
     )
     inject_memory: bool = Field(
@@ -250,10 +210,10 @@ class AdvancedSection(PluginConfigBase):
         },
     )
     llm_timeout_seconds: int = Field(
-        default=60,
+        default=180,
         description="单次 LLM 调用的最长等待时间（秒），到点放弃该次分析项。"
-        "注意：宿主对插件的单次能力调用约有 30 秒 RPC 硬上限，设置大于 30 通常不会有额外效果。",
-        json_schema_extra={"label": "LLM 调用超时（秒）", "hint": "默认 60；受宿主约 30 秒 RPC 上限约束"},
+        "插件会把该值传递给 MaiBot 的 cap.call RPC；增强任务建议保持低于宿主 240 秒硬上限。",
+        json_schema_extra={"label": "LLM 调用超时（秒）", "hint": "默认 180；增强任务宿主上限 240"},
     )
     render_timeout_seconds: int = Field(
         default=25,
@@ -261,9 +221,39 @@ class AdvancedSection(PluginConfigBase):
         json_schema_extra={"label": "图片渲染超时（秒）", "hint": "默认 25"},
     )
     group_timeout_seconds: int = Field(
-        default=300,
+        default=900,
         description="单个群完成消息读取、事件提取和图片渲染的整体超时时间",
-        json_schema_extra={"label": "单群整体超时（秒）", "hint": "Ubuntu/Docker 推荐 300"},
+        json_schema_extra={"label": "单群整体超时（秒）", "hint": "完整覆盖推荐 900"},
+    )
+    topic_scan_task: str = Field(
+        default="daily_topic_scan",
+        description="旧版兼容字段；新版固定使用 plugin_daily_extract。",
+        json_schema_extra={"label": "旧版话题扫描任务", "hidden": True, "deprecated": True},
+    )
+    event_refine_task: str = Field(
+        default="daily_event_refine",
+        description="旧版兼容字段；新版固定使用 plugin_daily_compose。",
+        json_schema_extra={"label": "旧版事件精炼任务", "hidden": True, "deprecated": True},
+    )
+    event_chunk_messages: int = Field(
+        default=120,
+        description="每个事件提取分段最多包含的消息数；较小分段更容易在单次模型等待时间内返回",
+        json_schema_extra={"label": "每分段消息数", "hint": "推荐 120"},
+    )
+    event_chunk_characters: int = Field(
+        default=8000,
+        description="每个事件提取分段估算的最大字符数",
+        json_schema_extra={"label": "每分段字符数", "hint": "推荐 8000"},
+    )
+    event_retry_count: int = Field(
+        default=2,
+        description="事件分段失败后的重试次数，最大按3处理",
+        json_schema_extra={"label": "分段重试次数", "hint": "推荐 2"},
+    )
+    split_chunk_on_failure: bool = Field(
+        default=True,
+        description="分段重试仍失败时，将该时段一分为二后再次分析",
+        json_schema_extra={"label": "失败后拆分重试"},
     )
 
 
@@ -272,7 +262,6 @@ class DailyAnalysisConfig(PluginConfigBase):
     summary: SummarySection = Field(default_factory=SummarySection)
     user_summary: UserSummarySection = Field(default_factory=UserSummarySection)
     auto_summary: AutoSummarySection = Field(default_factory=AutoSummarySection)
-    silence: SilenceSection = Field(default_factory=SilenceSection)
     command_permission: CommandPermissionSection = Field(default_factory=CommandPermissionSection)
     advanced: AdvancedSection = Field(default_factory=AdvancedSection)
 
@@ -300,45 +289,68 @@ class DailyAnalysisPlugin(MaiBotPlugin):
 
     async def on_load(self) -> None:
         adv = self.config.advanced
-        model_task = await self._validated_model_task()
+        routes = await self._resolve_plugin_tasks()
         self._service = AnalysisService(
             self.ctx,
-            model_task,
-            adv.llm_timeout_seconds,
-            self.config.auto_summary.timezone,
+            model=routes["main"],
+            topic_model=routes["extract"],
+            refine_model=routes["compose"],
+            verify_model=routes["verify"],
+            user_profile_model=routes["user_profile"],
+            call_timeout_s=adv.llm_timeout_seconds,
+            timezone_name=self.config.auto_summary.timezone,
         )
         self._renderer = SummaryRenderer(self.ctx, self._render_timeout_ms())
         self._start_scheduler()
         self.ctx.logger.info(
-            f"私聊群事件日报插件已加载（模型任务: {model_task}，LLM超时: {adv.llm_timeout_seconds}s，"
+            "私聊群事件日报插件已加载（"
+            f"事实提取: {routes['extract']}，事件编排: {routes['compose']}，"
+            f"事实复核: {routes['verify']}，个人画像: {routes['user_profile']}，"
+            f"LLM超时: {adv.llm_timeout_seconds}s，"
             f"渲染超时: {adv.render_timeout_seconds}s）"
         )
 
     def _render_timeout_ms(self) -> int:
         return max(5, int(self.config.advanced.render_timeout_seconds or 25)) * 1000
 
-    async def _validated_model_task(self) -> str:
-        """校验配置的模型任务名是否为宿主可用任务；非法（如误填模型名）则回退 utils 并告警。
-
-        ctx.llm.generate(model=...) 只接受【任务名】(resolve_task_name 对未知名抛 ValueError)，
-        因此这里在加载/热更新时主动校验，避免误填导致每次分析静默失败。
-        """
-        want = (self.config.advanced.model_task or "utils").strip() or "utils"
+    async def _resolve_plugin_tasks(self) -> Dict[str, str]:
+        """解析宿主实际存在的插件专用任务；缺失时跟随 ``replyer``。"""
+        requested = {
+            "extract": (_PLUGIN_EXTRACT_TASK, "extract"),
+            "compose": (_PLUGIN_COMPOSE_TASK, "compose"),
+            "verify": (_PLUGIN_VERIFY_TASK, "verify"),
+            "user_profile": (_PLUGIN_USER_PROFILE_TASK, "user_profile"),
+        }
+        routes: Dict[str, str] = {"main": _MAIN_MODEL_TASK}
         try:
-            res = await self.ctx.llm.get_available_models()
-            models = res.get("models") if isinstance(res, dict) else res
-            if isinstance(models, list) and models:
-                if want in models:
-                    return want
-                fallback = "utils" if "utils" in models else str(models[0])
-                self.ctx.logger.warning(
-                    f"配置的模型任务 '{want}' 不在可用任务列表 {models} 中"
-                    f"（只能填任务名、不能填模型名），已回退到 '{fallback}'"
-                )
-                return fallback
-        except Exception as e:
-            self.ctx.logger.warning(f"校验模型任务可用性失败，按配置值 '{want}' 使用: {e}")
-        return want
+            result = await self.ctx.llm.get_available_models()
+            models: Any = result
+            # maibot_sdk 2.7.1 返回 list[str]；保留对旧 RPC 包装
+            # {"models": list[str]} 的兼容，其他结构不推断为任务配置。
+            if isinstance(result, dict):
+                models = result.get("models", [])
+            available = (
+                {
+                    task_name.strip()
+                    for task_name in models
+                    if isinstance(task_name, str) and task_name.strip()
+                }
+                if isinstance(models, (list, tuple, set))
+                else set()
+            )
+            for key, (task_name, label) in requested.items():
+                routes[key] = task_name if task_name in available else routes["main"]
+                if routes[key] != task_name:
+                    self.ctx.logger.warning(
+                        f"MaiBot task '{task_name}' is not registered; {label} follows 'replyer'. "
+                        "Install the optional MaiBot task patch to configure it independently."
+                    )
+            return routes
+        except Exception as exc:
+            self.ctx.logger.warning(
+                f"model task lookup failed; all plugin tasks safely follow 'replyer': {exc}"
+            )
+        return {"main": _MAIN_MODEL_TASK, **{key: _MAIN_MODEL_TASK for key in requested}}
 
     async def on_unload(self) -> None:
         await self._stop_scheduler()
@@ -377,8 +389,13 @@ class DailyAnalysisPlugin(MaiBotPlugin):
             return
         # 同步分析模型任务与超时设置
         if self._service is not None:
-            self._service.model = await self._validated_model_task()
-            self._service.call_timeout_s = max(5, int(self.config.advanced.llm_timeout_seconds or 60))
+            routes = await self._resolve_plugin_tasks()
+            self._service.model = routes["main"]
+            self._service.topic_model = routes["extract"]
+            self._service.refine_model = routes["compose"]
+            self._service.verify_model = routes["verify"]
+            self._service.user_profile_model = routes["user_profile"]
+            self._service.call_timeout_s = max(5, int(self.config.advanced.llm_timeout_seconds or 180))
             self._service.timezone_name = (
                 self.config.auto_summary.timezone or "Asia/Shanghai"
             )
@@ -403,6 +420,28 @@ class DailyAnalysisPlugin(MaiBotPlugin):
             return {}
         try:
             if isinstance(schema, dict):
+                def strip_legacy_fields(node: Any) -> None:
+                    if isinstance(node, dict):
+                        for field_name in _LEGACY_MODEL_FIELDS:
+                            node.pop(field_name, None)
+                        for value in list(node.values()):
+                            strip_legacy_fields(value)
+                    elif isinstance(node, list):
+                        node[:] = [
+                            item
+                            for item in node
+                            if not (
+                                isinstance(item, dict)
+                                and any(
+                                    item.get(key) in _LEGACY_MODEL_FIELDS
+                                    for key in ("name", "id", "key", "field")
+                                )
+                            )
+                        ]
+                        for item in node:
+                            strip_legacy_fields(item)
+
+                strip_legacy_fields(schema)
                 sections = schema.get("sections")
                 if isinstance(sections, dict) and sections:
                     ordered = sorted(
@@ -624,47 +663,6 @@ class DailyAnalysisPlugin(MaiBotPlugin):
         target_chats = self._as_id_set(self.config.auto_summary.target_chats)
         return bool(target_chats) and str(group_id) in target_chats
 
-    def _is_silent_group(self, group_id: str) -> bool:
-        """只允许日报来源白名单中的群进入绝对静默名单。"""
-
-        if not group_id or not self.config.silence.enabled:
-            return False
-        allowed_groups = self._as_id_set(self.config.auto_summary.target_chats)
-        silent_groups = self._as_id_set(self.config.silence.target_chats)
-        return str(group_id) in allowed_groups.intersection(silent_groups)
-
-    @staticmethod
-    def _outbound_group_id(message: Any) -> str:
-        """从官方 send_service Hook 的序列化 SessionMessage 中读取群号。"""
-
-        if not isinstance(message, dict):
-            return ""
-        message_info = message.get("message_info")
-        if not isinstance(message_info, dict):
-            return ""
-        group_info = message_info.get("group_info")
-        if not isinstance(group_info, dict):
-            return ""
-        return str(group_info.get("group_id") or "").strip()
-
-    @HookHandler(
-        "send_service.before_send",
-        name="silent_group_send_guard",
-        description="阻止绝对静默名单群的所有出站消息，同时保留消息接收和日报读取",
-        mode=HookMode.BLOCKING,
-        order=HookOrder.EARLY,
-        timeout_ms=1000,
-        error_policy=ErrorPolicy.ABORT,
-    )
-    async def guard_silent_group_send(self, **kwargs: Any) -> Dict[str, str]:
-        """在 Platform IO 前做最终拦截，覆盖普通回复、命令和其他插件发送。"""
-
-        group_id = self._outbound_group_id(kwargs.get("message"))
-        if self._is_silent_group(group_id):
-            self.ctx.logger.info(f"已阻止绝对静默群 {group_id} 的出站消息")
-            return {"action": "abort"}
-        return {"action": "continue"}
-
     # ==================== 后台总结任务（命令秒回，重活后台跑） ====================
 
     @staticmethod
@@ -807,9 +805,22 @@ class DailyAnalysisPlugin(MaiBotPlugin):
             return result
 
         summary_cfg = self.config.summary
+        advanced_cfg = self.config.advanced
+        coverage_mode = (
+            "full" if summary_cfg.coverage_mode == "完整覆盖" else "balanced"
+        )
+        detail_level = {
+            "精简": "concise",
+            "完整": "full",
+        }.get(summary_cfg.detail_level, "standard")
         report = await self._service.analyze_group_event_report(
             messages,
-            max_events=max(1, min(20, int(summary_cfg.max_events or 8))),
+            max_events=max(1, min(30, int(summary_cfg.max_events or 12))),
+            max_minor_events=(
+                500
+                if int(summary_cfg.max_minor_events or 0) <= 0
+                else min(500, int(summary_cfg.max_minor_events))
+            ),
             max_anchors=(
                 max(0, min(5, int(summary_cfg.anchors_per_event or 2)))
                 if summary_cfg.include_anchor_quotes
@@ -817,9 +828,32 @@ class DailyAnalysisPlugin(MaiBotPlugin):
             ),
             max_input_messages=max(100, int(summary_cfg.max_input_messages or 1200)),
             include_links=bool(summary_cfg.include_links),
+            coverage_mode=coverage_mode,
+            detail_level=detail_level,
+            chunk_messages=max(
+                20, min(300, int(advanced_cfg.event_chunk_messages or 120))
+            ),
+            chunk_characters=max(
+                2000,
+                min(30000, int(advanced_cfg.event_chunk_characters or 8000)),
+            ),
+            retry_count=max(
+                0, min(3, int(advanced_cfg.event_retry_count or 0))
+            ),
+            split_on_timeout=bool(advanced_cfg.split_chunk_on_failure),
+            refine_major_events=bool(
+                getattr(summary_cfg, "refine_major_events", True)
+            ),
         )
         result["report"] = report
-        result["status"] = "ok" if report.get("events") else "empty"
+        if report.get("partial"):
+            # 即使成功分片没有提取到事件，也必须保留“部分完成”和失败时间范围，
+            # 不能把存在缺口的结果降成普通空日报或笼统失败。
+            result["status"] = "partial"
+        elif report.get("events"):
+            result["status"] = "ok"
+        else:
+            result["status"] = "empty"
         return result
 
     async def _deliver_event_reports(
@@ -836,13 +870,13 @@ class DailyAnalysisPlugin(MaiBotPlugin):
         results: List[Dict[str, Any]] = []
         min_messages = max(1, int(self.config.auto_summary.min_messages or 10))
         group_timeout = max(
-            60, int(self.config.advanced.group_timeout_seconds or 300)
+            60, int(self.config.advanced.group_timeout_seconds or 900)
         )
 
         await self._send_text_chunks(
             f"已开始{request_label}：共 {len(groups)} 个群。\n"
             f"统计范围：{period_text}\n"
-            "源群将保持静默。",
+            "进度和结果只发送到当前管理员私聊。",
             destination_stream_id,
         )
 
@@ -889,39 +923,117 @@ class DailyAnalysisPlugin(MaiBotPlugin):
 
         delivered_groups = 0
         for item in results:
-            if item.get("status") != "ok":
+            if item.get("status") not in {"ok", "partial"}:
                 continue
             report = item["report"]
+            events = report.get("events") or []
+            major_count = sum(
+                1 for event in events if event.get("importance") != "minor"
+            )
+            minor_count = len(events) - major_count
+            coverage = report.get("coverage") or {}
+            coverage_text = (
+                f"，覆盖率 {float(coverage.get('coverage_percent') or 0):.1f}%"
+                if coverage
+                else ""
+            )
+            refinement = report.get("refinement") or {}
+            refinement_text = (
+                f"，主要事件精炼 "
+                f"{int(refinement.get('refined') or 0)}/"
+                f"{int(refinement.get('requested') or 0)}"
+                if refinement.get("requested")
+                else ""
+            )
+            partial_text = "（部分完成）" if item.get("status") == "partial" else ""
+            failed_ranges = coverage.get("failed_ranges") or []
+            failed_ranges_text = ""
+            if failed_ranges:
+                failed_ranges_text = "\n未完成时段：" + "、".join(
+                    f"{entry.get('start_time', '?')}—"
+                    f"{entry.get('end_time', '?')}"
+                    for entry in failed_ranges
+                )
             await self.ctx.send.text(
                 f"【{item['group_name']}（{item['group_id']}）】"
-                f"共提取 {len(report.get('events') or [])} 个重要事件",
+                f"主要事件 {major_count} 个，普通话题 {minor_count} 个"
+                f"{coverage_text}{refinement_text}{partial_text}"
+                f"{failed_ranges_text}",
                 destination_stream_id,
             )
-            images = await self._renderer.generate_event_report_images(
-                group_name=item["group_name"],
-                group_id=item["group_id"],
-                report_date=report_date,
-                period_text=period_text,
-                message_count=int(item.get("message_count") or 0),
-                report=report,
-                events_per_page=max(
-                    1, min(8, int(self.config.summary.events_per_page or 4))
-                ),
-            )
-            if not images:
-                item["status"] = "failed"
-                item["error"] = "图片渲染失败"
-                await self.ctx.send.text(
-                    f"{item['group_name']}（{item['group_id']}）图片渲染失败",
-                    destination_stream_id,
-                )
+            if not events:
+                # 部分完成但成功分片恰好没有事件时，只发送可读的覆盖状态；
+                # 没有事件不是图片渲染失败。
                 continue
-
             sent_all = True
-            for image_base64 in images:
-                sent_all = bool(
-                    await self.ctx.send.image(image_base64, destination_stream_id)
-                ) and sent_all
+            image_delivery_uncertain = False
+            if major_count:
+                images = await self._renderer.generate_event_report_images(
+                    group_name=item["group_name"],
+                    group_id=item["group_id"],
+                    report_date=report_date,
+                    period_text=period_text,
+                    message_count=int(item.get("message_count") or 0),
+                    report=report,
+                    events_per_page=max(
+                        1, min(8, int(self.config.summary.events_per_page or 4))
+                    ),
+                )
+                if not images:
+                    image_delivery_uncertain = True
+                    item["error"] = "主要事件图片渲染失败，已发送文字版"
+                else:
+                    for image_base64 in images:
+                        try:
+                            image_result = await self.ctx.send.image(
+                                image_base64,
+                                destination_stream_id,
+                            )
+                            if image_result is False or image_result is None:
+                                image_delivery_uncertain = True
+                        except Exception as exc:
+                            image_delivery_uncertain = True
+                            self.ctx.logger.warning(
+                                f"群 {item['group_id']} 主要事件图片发送异常，"
+                                f"将使用文字降级: {exc}"
+                            )
+
+                if image_delivery_uncertain:
+                    major_events = [
+                        event
+                        for event in events
+                        if event.get("importance") != "minor"
+                    ]
+                    major_report = {**report, "events": major_events}
+                    await self.ctx.send.text(
+                        f"{item['group_name']}（{item['group_id']}）部分主要事件图片"
+                        "发送状态异常，以下补发可搜索文字版。",
+                        destination_stream_id,
+                    )
+                    await self._send_text_chunks(
+                        build_event_plain_text(
+                            item["group_name"],
+                            item["group_id"],
+                            report_date,
+                            period_text,
+                            major_report,
+                        ),
+                        destination_stream_id,
+                    )
+                    if item.get("status") == "ok":
+                        item["status"] = "partial"
+                    item["error"] = "主要事件图片发送状态异常，已补发文字版"
+                    sent_all = True
+
+            if minor_count:
+                topic_pages = build_minor_topic_timeline_pages(
+                    item["group_name"],
+                    item["group_id"],
+                    report_date,
+                    events,
+                )
+                for topic_page in topic_pages:
+                    await self.ctx.send.text(topic_page, destination_stream_id)
             if sent_all:
                 delivered_groups += 1
                 if self.config.advanced.inject_memory:
@@ -942,6 +1054,7 @@ class DailyAnalysisPlugin(MaiBotPlugin):
                 item["error"] = "私聊图片发送失败"
 
         failed = sum(1 for item in results if item.get("status") == "failed")
+        partial = sum(1 for item in results if item.get("status") == "partial")
         empty = sum(
             1
             for item in results
@@ -949,7 +1062,7 @@ class DailyAnalysisPlugin(MaiBotPlugin):
         )
         await self.ctx.send.text(
             f"{request_label}完成：成功发送 {delivered_groups} 个群，"
-            f"无重要内容/消息不足 {empty} 个，失败 {failed} 个。",
+            f"部分完成 {partial} 个，无重要内容/消息不足 {empty} 个，失败 {failed} 个。",
             destination_stream_id,
         )
         return results
@@ -1135,10 +1248,6 @@ class DailyAnalysisPlugin(MaiBotPlugin):
             if not self._check_group_permission(group_id):
                 return False, f"群 {group_id} 无 /mysummary 权限", 0
 
-            if self._is_silent_group(group_id):
-                self.ctx.logger.info(f"已静默拦截群 {group_id} 内的 /mysummary")
-                return True, "绝对静默群内已拦截", 2
-
             if not self.config.user_summary.enabled:
                 return False, "个人总结功能已关闭", 0
 
@@ -1284,33 +1393,16 @@ class DailyAnalysisPlugin(MaiBotPlugin):
     async def _build_user_summary_image(
         self, user_messages: List[dict], user_name: str, user_id: str, target_date: datetime
     ) -> Tuple[Optional[str], Optional[str]]:
-        """分析个人各模块并渲染个人总结图片，返回 (base64, summary_text)"""
+        """生成事实型个人画像并渲染，返回 (base64, profile_text)。"""
         service = self._service
         user_stats = service.analyze_single_user_stats(user_messages)
-
-        results = await asyncio.gather(
-            service.analyze_single_user_summary(user_messages, user_name, user_id),
-            service.analyze_single_user_portrait(user_messages, user_name, user_id),
-            service.analyze_single_user_depression(user_messages, user_name, user_id),
-            service.analyze_single_user_quotes(user_messages, user_name, user_id),
-            return_exceptions=True,
+        portrait_data = await service.analyze_single_user_portrait(
+            user_messages, user_name, user_id
         )
-        for r in results:
-            if isinstance(r, Exception):
-                self.ctx.logger.error(f"个人分析子任务异常: {r}", exc_info=r)
-        summary_text = results[0] if isinstance(results[0], str) else None
-        portrait_data = results[1] if isinstance(results[1], dict) else None
-        depression_data = results[2] if isinstance(results[2], dict) else None
-        golden_quotes = results[3] if isinstance(results[3], list) else None
-
-        display_order = _slots_to_display_order(
-            [
-                self.config.user_summary.slot_1,
-                self.config.user_summary.slot_2,
-                self.config.user_summary.slot_3,
-                self.config.user_summary.slot_4,
-            ],
-            _PERSONAL_MODULE_MAP,
+        summary_text = (
+            str(portrait_data.get("summary") or "").strip()
+            if isinstance(portrait_data, dict)
+            else ""
         )
 
         image_base64 = await self._renderer.generate_user_summary_image(
@@ -1320,16 +1412,10 @@ class DailyAnalysisPlugin(MaiBotPlugin):
             message_count=user_stats["message_count"],
             total_characters=user_stats["char_count"],
             emoji_count=user_stats["emoji_count"],
-            hourly_distribution=user_stats["hourly_distribution"],
-            user_title=portrait_data.get("title", "") if portrait_data else "",
-            user_mbti=portrait_data.get("mbti", "") if portrait_data else "",
             portrait_data=portrait_data,
-            depression_data=depression_data,
-            golden_quotes=golden_quotes,
-            display_order=display_order,
             target_date=target_date,
         )
-        return image_base64, summary_text
+        return image_base64, summary_text or None
 
     # ==================== 定时自动总结 ====================
 

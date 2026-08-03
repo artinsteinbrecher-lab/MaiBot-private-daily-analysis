@@ -1,0 +1,25 @@
+name: 功能建议
+description: 建议与事实型群聊日报直接相关的改进。
+title: "[Feature] "
+labels:
+  - enhancement
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: 要解决的问题
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: 建议方案
+    validations:
+      required: true
+  - type: checkboxes
+    id: scope
+    attributes:
+      label: 范围确认
+      options:
+        - label: 该建议服务于事实总结、可读性、可靠性或安装维护，不是娱乐排名或人格标签功能。
+          required: true

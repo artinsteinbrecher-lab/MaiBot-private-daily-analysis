@@ -1,7 +1,7 @@
 """
 聊天分析服务
 
-把聊天记录交给 LLM 做各类分析（话题、群友称号、金句、炫压抑评级、个人画像等）。
+把聊天记录交给 LLM 做事实型事件日报和个人画像分析。
 所有 LLM 调用通过宿主注入的 ``ctx.llm`` 能力完成；纯数据处理保持为静态方法。
 
 消息字典遵循插件运行时的扁平结构（由 plugin.py 的归一化层提供）：
@@ -15,38 +15,43 @@
 import re
 import json
 import asyncio
+import hashlib
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from collections import Counter
 from zoneinfo import ZoneInfo
 
-from .constants import AnalysisConfig
-from .event_digest import merge_event_reports_fallback, normalize_event_report
+from .event_digest import (
+    merge_adjacent_event_candidates,
+    merge_event_reports_fallback,
+    normalize_event_report,
+    partition_events,
+)
 
 
 # LLM 各任务的输出 token 上限。
-# 注意：SDK→宿主的能力调用 RPC 固定 30 秒超时，单次 LLM 必须在 30 秒内返回，
-# 因此默认使用快速模型(utils/flash)并适度限制输出长度，避免超时。
+# 通过 maibot_sdk 的 ``rpc_timeout_ms`` 参数把插件配置的等待时间传递到宿主，避免
+# 高质量模型仍被 cap.call 的默认 30 秒 RPC 上限提前切断；输出长度仍保持保守。
 _SUMMARY_MAX_TOKENS = 1200
 _JSON_MAX_TOKENS = 2500
-# 多用户 JSON（群友称号/炫压抑评级）输出较长，但要兼顾 30 秒 RPC 超时，控制在 2500
-_MULTI_USER_JSON_MAX_TOKENS = 2500
 _EVENT_JSON_MAX_TOKENS = 3200
 
-# LLM 输入消息上限：取最近 N 条参与总结/话题/金句，避免超大群 prompt 过长拖慢生成
-_MAX_INPUT_MESSAGES = 400
-_EVENT_CHUNK_MESSAGES = 160
-_EVENT_CHUNK_CHARACTERS = 14000
+_EVENT_CHUNK_MESSAGES = 120
+_EVENT_CHUNK_CHARACTERS = 8000
+_TOPIC_MAX_CANDIDATES_PER_CHUNK = 24
+_MAJOR_REFINE_BATCH_SIZE = 4
+_EVENT_CANDIDATE_HARD_LIMIT = 1000
 
 # 并发 LLM 调用上限。设为 2：兼顾速度与"上游串行时排队不耗尽超时预算"。
 _LLM_MAX_CONCURRENCY = 2
 
-# 单次 LLM 调用的最长等待（秒），到点放弃该次分析项。注意：宿主对插件的单次能力调用
-# 约有 30 秒 RPC 硬上限，设大于 30 通常无额外效果；此值仅作客户端侧的等待上限。
-_DEFAULT_CALL_TIMEOUT_S = 60
+# 单次 LLM 调用的最长等待（秒），到点放弃该次分析项。增强任务的宿主硬上限为
+# 240 秒，因此默认保留 60 秒余量给 RPC 收尾、重试和单群整体超时控制。
+_DEFAULT_CALL_TIMEOUT_S = 180
+_RPC_TIMEOUT_GRACE_S = 5
 
-# 默认模型任务：utils 对应快速非思考模型，速度快、稳定
-_DEFAULT_MODEL_TASK = "utils"
+# 默认跟随 MaiBot replyer；仅当宿主实际注册专用任务时，插件加载过程才传入专用路由。
+_DEFAULT_MODEL_TASK = "replyer"
 
 
 class AnalysisService:
@@ -75,20 +80,27 @@ class AnalysisService:
         self,
         ctx: Any,
         model: str = _DEFAULT_MODEL_TASK,
+        topic_model: str = "",
+        refine_model: str = "",
         call_timeout_s: int = _DEFAULT_CALL_TIMEOUT_S,
         timezone_name: str = "Asia/Shanghai",
+        verify_model: str = "",
+        user_profile_model: str = "",
     ):
         self.ctx = ctx
         self.logger = ctx.logger
-        # 模型任务名（可由插件配置覆盖）。默认 utils=快速模型，确保 30 秒内返回
+        # 模型任务名由插件从宿主实际注册的高级任务解析；直接使用时默认跟随 replyer。
         self.model = model or _DEFAULT_MODEL_TASK
+        self.topic_model = topic_model or self.model
+        self.refine_model = refine_model or self.topic_model
+        self.verify_model = verify_model or ""
+        self.user_profile_model = user_profile_model or self.model
         # 单次 LLM 调用的客户端等待上限（秒），可由插件配置覆盖
         self.call_timeout_s = max(5, int(call_timeout_s or _DEFAULT_CALL_TIMEOUT_S))
         self.timezone_name = timezone_name or "Asia/Shanghai"
-        # 限制并发 LLM 调用数：每个能力调用有约 30 秒 RPC 硬超时，若上游串行处理，
-        # 一次放出过多调用会让排队靠后的调用把等待时间算进自己的超时预算而被掐断。
-        # 信号量在"真正发起 ctx.llm.generate 之前"获取，确保每次调用的 30 秒计时
-        # 从有空闲槽位时才开始，避免排队耗尽预算。
+        # 限制并发 LLM 调用数：若上游串行处理，一次放出过多调用会让排队靠后的调用
+        # 把等待时间算进自己的超时预算。信号量在真正发起 ctx.llm.generate 前获取，
+        # 让每个调用的 RPC 预算从有空闲槽位时才开始。
         self._llm_semaphore = asyncio.Semaphore(_LLM_MAX_CONCURRENCY)
 
     # ==================== LLM 调用封装 ====================
@@ -100,6 +112,7 @@ class AnalysisService:
         request_type: str,
         max_tokens: int = _JSON_MAX_TOKENS,
         temperature: float = 0.7,
+        model_task: str = "",
     ) -> Optional[str]:
         """调用宿主 LLM 能力，成功返回文本，失败返回 None"""
         try:
@@ -107,11 +120,12 @@ class AnalysisService:
                 result = await asyncio.wait_for(
                     self.ctx.llm.generate(
                         prompt,
-                        model=self.model,
+                        model=model_task or self.model,
                         temperature=temperature,
                         max_tokens=max_tokens,
+                        rpc_timeout_ms=self.call_timeout_s * 1000,
                     ),
-                    timeout=self.call_timeout_s,
+                    timeout=self.call_timeout_s + _RPC_TIMEOUT_GRACE_S,
                 )
         except asyncio.TimeoutError:
             self.logger.warning(f"LLM 调用超时 ({request_type}, >{self.call_timeout_s}s)")
@@ -307,9 +321,19 @@ class AnalysisService:
         return selected
 
     @staticmethod
-    def _chunk_event_messages(messages: List[dict]) -> List[List[dict]]:
+    def _chunk_event_messages(
+        messages: List[dict],
+        *,
+        max_messages: int = _EVENT_CHUNK_MESSAGES,
+        max_characters: int = _EVENT_CHUNK_CHARACTERS,
+    ) -> List[List[dict]]:
         """按消息数和字符数切分，控制单次 LLM 请求体积。"""
 
+        max_messages = max(20, min(300, int(max_messages or _EVENT_CHUNK_MESSAGES)))
+        max_characters = max(
+            2000,
+            min(30000, int(max_characters or _EVENT_CHUNK_CHARACTERS)),
+        )
         chunks: List[List[dict]] = []
         current: List[dict] = []
         current_chars = 0
@@ -317,8 +341,8 @@ class AnalysisService:
             text = str(message.get("processed_plain_text") or "")
             estimated = len(text) + 60
             if current and (
-                len(current) >= _EVENT_CHUNK_MESSAGES
-                or current_chars + estimated > _EVENT_CHUNK_CHARACTERS
+                len(current) >= max_messages
+                or current_chars + estimated > max_characters
             ):
                 chunks.append(current)
                 current = []
@@ -345,6 +369,21 @@ class AnalysisService:
             or "未知用户"
         ).strip()
 
+    def _event_message_id(self, message: dict) -> str:
+        """为消息生成跨格式化/校验阶段一致的本地证据 ID。"""
+
+        configured = str(message.get("message_id") or message.get("id") or "").strip()
+        if configured:
+            return configured[:120]
+        timestamp = float(message.get("time") or 0)
+        text = re.sub(
+            r"\s+", " ", str(message.get("processed_plain_text") or "")
+        ).strip()
+        payload = f"{timestamp:.6f}\0{self._event_speaker(message)}\0{text}".encode(
+            "utf-8", errors="ignore"
+        )
+        return "m-" + hashlib.sha1(payload).hexdigest()[:16]
+
     def _format_event_messages(self, messages: List[dict]) -> str:
         """为事件抽取提供带精确时间和发言人的记录。"""
 
@@ -362,7 +401,8 @@ class AnalysisService:
                 continue
             time_text = self._event_datetime(timestamp).strftime("%H:%M:%S")
             display_name = self._event_speaker(message)
-            lines.append(f"[{time_text}] {display_name}: {text[:800]}")
+            message_id = self._event_message_id(message)
+            lines.append(f"[{time_text}] [id={message_id}] {display_name}: {text[:800]}")
         return "\n".join(lines)
 
     def _ground_event_report(
@@ -371,6 +411,7 @@ class AnalysisService:
         messages: List[dict],
         *,
         max_events: int,
+        max_minor_events: int = 0,
         max_anchors: int,
         include_links: bool,
     ) -> Dict[str, Any]:
@@ -394,18 +435,26 @@ class AnalysisService:
                 continue
             minute = self._event_datetime(timestamp).strftime("%H:%M")
             speaker = self._event_speaker(message)
-            records.append({"time": minute, "speaker": speaker, "text": text})
+            message_id = self._event_message_id(message)
+            records.append({
+                "message_id": message_id,
+                "time": minute,
+                "speaker": speaker,
+                "text": text,
+            })
             valid_minutes.add(minute)
             valid_speakers.add(speaker)
             source_text.append(text)
 
         grounded_events: List[Dict[str, Any]] = []
+        valid_record_ids = {record["message_id"] for record in records}
         for raw_event in value.get("events") or []:
             if not isinstance(raw_event, dict):
                 continue
             event = dict(raw_event)
 
             anchors = []
+            evidence_ids = []
             if max_anchors > 0:
                 for raw_anchor in event.get("anchors") or []:
                     if not isinstance(raw_anchor, dict):
@@ -419,13 +468,14 @@ class AnalysisService:
                     ).strip()
                     if not anchor_time or not anchor_speaker or not anchor_quote:
                         continue
-                    matched = any(
-                        record["time"] == anchor_time
+                    matching_records = [
+                        record
+                        for record in records
+                        if record["time"] == anchor_time
                         and record["speaker"] == anchor_speaker
                         and anchor_quote in record["text"]
-                        for record in records
-                    )
-                    if matched:
+                    ]
+                    if matching_records:
                         anchors.append(
                             {
                                 "time": anchor_time,
@@ -433,9 +483,18 @@ class AnalysisService:
                                 "quote": anchor_quote,
                             }
                         )
+                        evidence_ids.append(matching_records[0]["message_id"])
                     if len(anchors) >= max_anchors:
                         break
             event["anchors"] = anchors
+            configured_evidence = event.get("evidence_ids")
+            if isinstance(configured_evidence, list):
+                evidence_ids.extend(
+                    evidence_id
+                    for item in configured_evidence
+                    if (evidence_id := str(item).strip()) in valid_record_ids
+                )
+            event["evidence_ids"] = list(dict.fromkeys(evidence_ids))[:24]
 
             start_time = str(event.get("start_time") or "").strip()
             end_time = str(event.get("end_time") or "").strip()
@@ -466,57 +525,150 @@ class AnalysisService:
                 ]
             else:
                 event["links"] = []
+
+            def bind_claims(values: Any) -> tuple[list, list]:
+                if not isinstance(values, list):
+                    return [], []
+                kept = []
+                bindings = []
+                seen = set()
+                for value in values:
+                    claim_value = value.get("claim") if isinstance(value, dict) else value
+                    claim = str(claim_value or "").strip()
+                    claim = re.sub(r"\s+", " ", claim)[:240]
+                    if not claim or claim in seen:
+                        continue
+                    compact_claim = re.sub(r"\W", "", claim).lower()
+                    configured_claim_ids = (
+                        value.get("evidence_ids") if isinstance(value, dict) else []
+                    )
+                    claim_ids = []
+                    configured_ids = {
+                        str(item).strip()
+                        for item in configured_claim_ids or []
+                        if str(item).strip() in valid_record_ids
+                    }
+                    for record in records:
+                        compact_text = re.sub(r"\W", "", record["text"]).lower()
+                        text_matches = len(compact_claim) >= 4 and (
+                            compact_claim in compact_text or compact_text in compact_claim
+                        )
+                        if text_matches and (
+                            not configured_ids or record["message_id"] in configured_ids
+                        ):
+                            claim_ids.append(record["message_id"])
+                    claim_ids = list(dict.fromkeys(claim_ids))[:8]
+                    if not claim_ids:
+                        continue
+                    seen.add(claim)
+                    kept.append(claim)
+                    bindings.append({"claim": claim, "evidence_ids": claim_ids})
+                return kept, bindings
+
+            event["facts"], event["fact_bindings"] = bind_claims(
+                event.get("facts") or [event.get("summary")]
+            )
+            event["outcomes"], event["outcome_bindings"] = bind_claims(
+                event.get("outcomes")
+            )
+            event["pending"], event["pending_bindings"] = bind_claims(
+                event.get("pending")
+            )
+            if not event["facts"]:
+                continue
+            event["evidence_ids"] = list(
+                dict.fromkeys(
+                    event["evidence_ids"]
+                    + [
+                        evidence_id
+                        for field in (
+                            "fact_bindings",
+                            "outcome_bindings",
+                            "pending_bindings",
+                        )
+                        for binding in event[field]
+                        for evidence_id in binding["evidence_ids"]
+                    ]
+                )
+            )[:24]
             grounded_events.append(event)
 
         return normalize_event_report(
             {"overview": value.get("overview"), "events": grounded_events},
             max_events=max_events,
+            max_minor_events=max_minor_events,
             max_anchors=max_anchors,
             include_links=include_links,
+        )
+
+    @staticmethod
+    def _event_detail_instruction(detail_level: str) -> str:
+        if detail_level == "full":
+            return (
+                "完整模式：除纯寒暄、无意义复读和纯表情刷屏外，分享、求助、测试、"
+                "故障、决定、争议、教程、资源发布和有明确内容的普通话题都应记录。"
+                "重大决定或持续讨论标为 major，其余有效动态标为 minor。"
+            )
+        if detail_level == "concise":
+            return (
+                "精简模式：只记录明确决定、故障、发布、重要通知或持续深入讨论，"
+                "全部标为 major；普通话题不记录。"
+            )
+        return (
+            "标准模式：记录重要事件及有实际内容的普通话题；重要事项标为 major，"
+            "较小但可回查的有效动态标为 minor。"
         )
 
     async def _extract_event_chunk(
         self,
         messages: List[dict],
         *,
-        max_events: int,
         max_anchors: int,
         include_links: bool,
-        chunk_index: int,
+        detail_level: str,
+        chunk_label: str,
         chunk_count: int,
-    ) -> Dict[str, Any]:
+    ) -> Optional[Dict[str, Any]]:
         chat_text = self._format_event_messages(messages)
         if not chat_text:
             return {"overview": "", "events": []}
 
-        prompt = f"""你是一名严谨的群聊事件记录员。请从下面的 QQ 群聊记录中提取真正发生的事情，
-不要做成员活跃度、性格、MBTI、金句或娱乐排名，也不要把寒暄、复读、表情刷屏当作事件。
+        detail_instruction = self._event_detail_instruction(detail_level)
+        prompt = f"""你是一名严谨的群聊话题索引员。请从下面的 QQ 群聊记录中建立轻量时间线，
+不要做成员活跃度、性格、MBTI、金句或娱乐排名，也不要把纯寒暄、无意义复读、表情刷屏当作话题。
 
-这是全天记录的第 {chunk_index}/{chunk_count} 段。每条记录前的时间是唯一可信时间来源。
+这是全天记录的第 {chunk_label}/{chunk_count} 段。每条记录前的时间是唯一可信时间来源。
+{detail_instruction}
 
 群聊记录：
 {chat_text}
 
 输出要求：
-1. 按时间顺序提取本段最多 {max_events} 个有实际内容的事件。
-2. 事件应包括：事情经过、明确结论、待确认事项、必要参与者、重要链接。
+1. 按时间顺序提取本段最多 {_TOPIC_MAX_CANDIDATES_PER_CHUNK} 个有实际内容的话题。
+2. 这是第一阶段索引：summary 只写一两句事实概括，不展开长篇分析。
 3. start_time/end_time 和 anchors.time 必须原样取自记录中的 HH:MM，不得猜测。
-4. anchors 最多 {max_anchors} 条，只摘录便于回查的关键原话；quote 不超过 80 字。
-5. 没有重要事件时返回空 events。
-6. 只陈述记录能支持的事实；无法确认的内容写入 pending，不要自行补全。
+4. 每个话题最多保留 1 条关键原话；quote 不超过 80 字。
+5. 没有有效话题时返回空 events。
+6. 只陈述记录能支持的事实，不要自行补全结论。每条事实都必须绑定真实 id，claim 应尽量复用
+   对应原消息的连续措辞，便于本地进行严格文本核验。
 7. 链接必须逐字复制原文；{"保留重要链接" if include_links else "links 始终返回空数组"}。
+8. importance 只能是 major 或 minor。故障、决定、发布、重要通知、争议或持续深入讨论标为 major；
+   其他有实际内容的话题标为 minor。
 
 只返回 JSON 对象，不要 Markdown：
 {{
-  "overview": "本段概览，80字以内",
+  "overview": "本段话题概览，80字以内",
   "events": [
     {{
+      "importance": "major",
       "start_time": "09:20",
       "end_time": "10:05",
       "title": "事件标题",
-      "summary": "事情经过和背景",
-      "outcomes": ["已经确定的结论"],
-      "pending": ["尚未解决或待确认事项"],
+      "summary": "一两句事实概括",
+      "status": "discussed",
+      "facts": [{{"claim": "可核对的事实", "evidence_ids": ["消息id"]}}],
+      "outcomes": [],
+      "pending": [],
       "participants": ["与事件直接相关的人"],
       "anchors": [
         {{"time": "09:24", "speaker": "昵称", "quote": "关键原话"}}
@@ -525,91 +677,579 @@ class AnalysisService:
     }}
   ]
 }}"""
+        prompt += (
+            "\n\nHard constraints for the extraction pass: include event_id for every event "
+            "(it may be empty on this first pass). Represent every fact, outcome, and pending "
+            "item as an object with claim and evidence_ids. Omit any claim that cannot be "
+            "grounded in the supplied source messages."
+        )
         result = await self._llm(
             prompt,
             request_type="plugin.daily_event.extract",
             max_tokens=_EVENT_JSON_MAX_TOKENS,
             temperature=0.2,
+            model_task=self.topic_model,
         )
-        parsed = self._parse_llm_json_object(result or "") or {}
+        if not result:
+            return None
+        parsed = self._parse_llm_json_object(result)
+        if parsed is None:
+            self.logger.warning(f"事件分段 {chunk_label}/{chunk_count} 返回了无效 JSON")
+            return None
         return self._ground_event_report(
             parsed,
             messages,
-            max_events=max_events,
-            max_anchors=max_anchors,
+            max_events=_TOPIC_MAX_CANDIDATES_PER_CHUNK,
+            max_minor_events=_TOPIC_MAX_CANDIDATES_PER_CHUNK,
+            max_anchors=min(1, max_anchors),
             include_links=include_links,
         )
 
-    async def _merge_event_candidates(
+    @staticmethod
+    def _time_to_minutes(value: Any) -> int:
+        try:
+            hour_text, minute_text = str(value).split(":", 1)
+            hour, minute = int(hour_text), int(minute_text)
+            if 0 <= hour <= 23 and 0 <= minute <= 59:
+                return hour * 60 + minute
+        except Exception:
+            pass
+        return -1
+
+    def _messages_for_event(
         self,
-        reports: List[Dict[str, Any]],
+        event: Dict[str, Any],
+        messages: List[dict],
+        *,
+        padding_minutes: int = 0,
+        max_messages: int = 0,
+    ) -> List[dict]:
+        start = self._time_to_minutes(event.get("start_time"))
+        end = self._time_to_minutes(event.get("end_time"))
+        if start < 0 or end < 0:
+            return []
+        start = max(0, start - max(0, padding_minutes))
+        end = min(23 * 60 + 59, end + max(0, padding_minutes))
+        selected = []
+        for message in messages:
+            timestamp = float(message.get("time") or 0)
+            if timestamp <= 0:
+                continue
+            moment = self._event_datetime(timestamp)
+            minute = moment.hour * 60 + moment.minute
+            if start <= minute <= end:
+                selected.append(message)
+        if max_messages > 0 and len(selected) > max_messages:
+            return self._select_time_balanced_messages(selected, max_messages)
+        return selected
+
+    def _prepare_event_candidates(
+        self,
+        report: Dict[str, Any],
+        messages: List[dict],
         *,
         max_events: int,
+        max_minor_events: int,
         max_anchors: int,
         include_links: bool,
     ) -> Dict[str, Any]:
-        if len(reports) == 1:
-            return normalize_event_report(
-                reports[0],
-                max_events=max_events,
-                max_anchors=max_anchors,
-                include_links=include_links,
-            )
+        """补充源消息指标、保守提升主要事件，并分别限制两类结果。"""
 
-        candidates = []
-        for report in reports:
-            candidates.extend(report.get("events") or [])
-        if not candidates:
-            return {"overview": "", "events": []}
-
-        prompt = f"""下面是同一个 QQ 群一天内分段提取的事件候选。请合并跨分段延续或重复的事件，
-保留全天真正重要的事件，按时间排序。不得创造新事实、时间、原话或链接。
-
-候选事件：
-{json.dumps(candidates, ensure_ascii=False)}
-
-要求：
-1. 最多保留 {max_events} 个事件。
-2. 每个事件最多保留 {max_anchors} 条回查锚点。
-3. 时间范围覆盖合并后事件最早到最晚的原始时间。
-4. overview 用 150—300 字概括这一天发生了什么，不写娱乐统计。
-5. 输出字段结构与候选事件一致。
-
-只返回 JSON 对象：
-{{"overview": "全天概览", "events": [...]}}"""
-        result = await self._llm(
-            prompt,
-            request_type="plugin.daily_event.merge",
-            max_tokens=_EVENT_JSON_MAX_TOKENS,
-            temperature=0.2,
+        events = merge_adjacent_event_candidates(
+            report.get("events") or [],
+            max_anchors=max_anchors,
         )
-        parsed = self._parse_llm_json_object(result or "")
-        if parsed:
-            normalized = normalize_event_report(
-                parsed,
-                max_events=max_events,
-                max_anchors=max_anchors,
-                include_links=include_links,
+        for event in events:
+            source = self._messages_for_event(event, messages)
+            speakers = {
+                self._event_speaker(message)
+                for message in source
+                if self._event_speaker(message)
+            }
+            event["source_message_count"] = len(source)
+            event["source_participant_count"] = len(speakers)
+            start = self._time_to_minutes(event.get("start_time"))
+            end = self._time_to_minutes(event.get("end_time"))
+            duration = max(0, end - start) if start >= 0 and end >= 0 else 0
+            if event.get("importance") == "minor":
+                should_promote = (
+                    len(source) >= 28
+                    or (
+                        duration >= 20
+                        and len(source) >= 12
+                        and len(speakers) >= 4
+                    )
+                    or (bool(event.get("links")) and len(source) >= 16)
+                )
+                if should_promote:
+                    event["importance"] = "major"
+
+        major, minor = partition_events(events)
+
+        def major_score(event: Dict[str, Any]) -> float:
+            start = self._time_to_minutes(event.get("start_time"))
+            end = self._time_to_minutes(event.get("end_time"))
+            duration = max(0, end - start) if start >= 0 and end >= 0 else 0
+            return (
+                float(event.get("source_message_count") or 0) * 2.0
+                + float(event.get("source_participant_count") or 0) * 5.0
+                + duration / 4.0
+                + len(event.get("links") or []) * 4.0
             )
-            if normalized["events"]:
-                return normalized
-        return merge_event_reports_fallback(
-            reports,
+
+        major = sorted(major, key=major_score, reverse=True)[:max_events]
+        if max_minor_events > 0:
+            minor = minor[:max_minor_events]
+        selected = major + minor
+        selected.sort(
+            key=lambda item: (
+                str(item.get("start_time") or ""),
+                str(item.get("end_time") or ""),
+                str(item.get("title") or ""),
+            )
+        )
+        return normalize_event_report(
+            {"overview": report.get("overview"), "events": selected},
             max_events=max_events,
+            max_minor_events=max(len(minor), 1) if minor else 0,
             max_anchors=max_anchors,
             include_links=include_links,
         )
+
+    async def _refine_major_batch(
+        self,
+        batch: List[Dict[str, Any]],
+        messages: List[dict],
+        *,
+        max_anchors: int,
+        include_links: bool,
+        detail_level: str,
+    ) -> Tuple[List[Dict[str, Any]], int]:
+        """批量精炼主要事件；失败事件原样返回，不影响话题索引完整性。"""
+
+        source_by_id: Dict[str, List[dict]] = {}
+        candidate_blocks: List[str] = []
+        for index, event in enumerate(batch, start=1):
+            candidate_id = f"E{index}"
+            source = self._messages_for_event(
+                event,
+                messages,
+                padding_minutes=3,
+                max_messages=70,
+            )
+            source_by_id[candidate_id] = source
+            source_text = self._format_event_messages(source)
+            if len(source_text) > 5000:
+                source_text = source_text[:5000]
+            candidate_blocks.append(
+                f"### {candidate_id}\n"
+                f"候选：{event.get('start_time')}—{event.get('end_time')}｜"
+                f"{event.get('title')}\n"
+                f"event_id:{event.get('event_id')}\n"
+                f"初步概括：{event.get('summary')}\n"
+                f"对应原消息：\n{source_text}"
+            )
+        prompt = f"""你是一名严谨的群聊事件编辑。下面是最多 {_MAJOR_REFINE_BATCH_SIZE} 个
+主要事件候选及其对应原消息。请逐个补充详细经过、明确结论、待确认事项、必要参与者、
+重要链接和回查原话。{self._event_detail_instruction(detail_level)}
+
+要求：
+1. 每个输入 candidate_id 最多输出一个事件，不要合并不同 ID。
+2. 时间、参与者、链接和原话只能来自对应 ID 的原消息。
+3. summary 详细说明发生过程和背景；facts、outcomes、pending 的每个声明都必须绑定
+   对应原消息中的真实 id，并尽量复用原消息的连续措辞以通过严格文本核验。
+   outcomes 只写已经确认的结论；pending 写明确提出但未解决的事项。
+4. 每个事件最多 {max_anchors} 条回查原话。
+5. 无法进一步确认时仍返回候选事实，不得编造。
+6. importance 始终为 major。status 只能是 suggested、inferred、discussed、decided、completed；
+   不确定时使用 discussed。
+
+{chr(10).join(candidate_blocks)}
+
+只返回 JSON：
+{{"events":[{{"candidate_id":"E1","importance":"major","status":"discussed",
+"start_time":"09:20","end_time":"10:05","title":"标题","summary":"详细经过",
+"facts":[{{"claim":"事实","evidence_ids":["消息id"]}}],
+"outcomes":[{{"claim":"已确认结果","evidence_ids":["消息id"]}}],
+"pending":[{{"claim":"待处理事项","evidence_ids":["消息id"]}}],
+"participants":[],"anchors":[],"links":[]}}]}}"""
+        prompt += (
+            "\n\nHard constraints for refinement: only compress, reorder, deduplicate, or "
+            "improve the wording of the supplied candidate and source messages. Do not add "
+            "people, times, causes, conclusions, outcomes, or pending items. Preserve the "
+            "candidate event_id and return it unchanged. Every fact, outcome, and pending "
+            "claim must retain a source evidence_ids binding; omit anything that cannot be "
+            "grounded."
+        )
+        result = await self._llm(
+            prompt,
+            request_type="plugin.daily_event.refine",
+            max_tokens=_EVENT_JSON_MAX_TOKENS,
+            temperature=0.2,
+            model_task=self.refine_model,
+        )
+        parsed = self._parse_llm_json_object(result or "")
+        raw_events = parsed.get("events") if isinstance(parsed, dict) else []
+        if not isinstance(raw_events, list):
+            raw_events = []
+        raw_by_id = {
+            str(item.get("candidate_id") or ""): item
+            for item in raw_events
+            if isinstance(item, dict)
+        }
+
+        refined: List[Dict[str, Any]] = []
+        success_count = 0
+        for index, candidate in enumerate(batch, start=1):
+            candidate_id = f"E{index}"
+            raw = raw_by_id.get(candidate_id)
+            if not raw:
+                refined.append(candidate)
+                continue
+            grounded = self._ground_event_report(
+                {"overview": "", "events": [{**raw, "importance": "major"}]},
+                source_by_id.get(candidate_id) or [],
+                max_events=1,
+                max_minor_events=0,
+                max_anchors=max_anchors,
+                include_links=include_links,
+            )
+            if not grounded.get("events"):
+                refined.append(candidate)
+                continue
+            event = grounded["events"][0]
+            # The candidate ID is authoritative; a refinement model must not
+            # be able to fork the event identity or create a new one.
+            event["event_id"] = str(
+                candidate.get("event_id") or event.get("event_id") or ""
+            )
+            event["source_message_count"] = candidate.get(
+                "source_message_count", 0
+            )
+            event["source_participant_count"] = candidate.get(
+                "source_participant_count", 0
+            )
+            event["refined"] = True
+            refined.append(event)
+            success_count += 1
+        return refined, success_count
+
+    async def _refine_major_events(
+        self,
+        report: Dict[str, Any],
+        messages: List[dict],
+        *,
+        max_anchors: int,
+        include_links: bool,
+        detail_level: str,
+    ) -> Dict[str, Any]:
+        major, minor = partition_events(report.get("events") or [])
+        if not major:
+            report["refinement"] = {
+                "requested": 0,
+                "refined": 0,
+                "fallback": 0,
+            }
+            return report
+        batches = [
+            major[index : index + _MAJOR_REFINE_BATCH_SIZE]
+            for index in range(0, len(major), _MAJOR_REFINE_BATCH_SIZE)
+        ]
+        outcomes = await asyncio.gather(
+            *(
+                self._refine_major_batch(
+                    batch,
+                    messages,
+                    max_anchors=max_anchors,
+                    include_links=include_links,
+                    detail_level=detail_level,
+                )
+                for batch in batches
+            )
+        )
+        refined_major = [event for events, _ in outcomes for event in events]
+        refined_count = sum(count for _, count in outcomes)
+        combined = refined_major + minor
+        combined.sort(
+            key=lambda item: (
+                str(item.get("start_time") or ""),
+                str(item.get("end_time") or ""),
+                str(item.get("title") or ""),
+            )
+        )
+        report["events"] = combined
+        report["refinement"] = {
+            "requested": len(major),
+            "refined": refined_count,
+            "fallback": len(major) - refined_count,
+        }
+        return report
+
+    async def _verify_major_batch(
+        self,
+        batch: List[Dict[str, Any]],
+        messages: List[dict],
+    ) -> Tuple[List[Dict[str, Any]], int]:
+        """独立复核声明；模型只能要求删除声明或下调事件状态。"""
+
+        blocks: List[str] = []
+        for event in batch:
+            source = self._messages_for_event(
+                event, messages, padding_minutes=3, max_messages=70
+            )
+            source_text = self._format_event_messages(source)[:5000]
+            claims = {
+                "facts": event.get("fact_bindings") or [],
+                "outcomes": event.get("outcome_bindings") or [],
+                "pending": event.get("pending_bindings") or [],
+            }
+            blocks.append(
+                f"### {event.get('event_id')}\n"
+                f"当前状态：{event.get('status', 'discussed')}\n"
+                f"待复核声明：{json.dumps(claims, ensure_ascii=False)}\n"
+                f"原消息：\n{source_text}"
+            )
+
+        prompt = f"""你是独立事实复核员。请逐个核对下面群聊事件中的声明与其 evidence_ids。
+
+硬性限制：
+1. 你不能改写或新增任何声明，也不能新增人物、时间、因果、结果或待办。
+2. unsupported 中只能逐字复制输入声明里不受对应原消息支持的 claim。
+3. status 只能保持不变或降级，等级从低到高为 suggested、inferred、discussed、decided、completed。
+4. 即使全部支持，也必须返回该 event_id 和空的 unsupported。
+
+{chr(10).join(blocks)}
+
+只返回 JSON：
+{{"events":[{{"event_id":"event-id","status":"discussed","unsupported":{{
+"facts":[],"outcomes":[],"pending":[]}}}}]}}"""
+        result = await self._llm(
+            prompt,
+            request_type="plugin.daily_event.verify",
+            max_tokens=_EVENT_JSON_MAX_TOKENS,
+            temperature=0.0,
+            model_task=self.verify_model,
+        )
+        parsed = self._parse_llm_json_object(result or "")
+        raw_events = parsed.get("events") if isinstance(parsed, dict) else None
+        if not isinstance(raw_events, list):
+            return list(batch), 0
+        directives = {
+            str(item.get("event_id") or ""): item
+            for item in raw_events
+            if isinstance(item, dict)
+        }
+        status_rank = {
+            "suggested": 0,
+            "inferred": 1,
+            "discussed": 2,
+            "decided": 3,
+            "completed": 4,
+        }
+        verified: List[Dict[str, Any]] = []
+        verified_count = 0
+        for original in batch:
+            event = dict(original)
+            directive = directives.get(str(event.get("event_id") or ""))
+            if not directive:
+                verified.append(event)
+                continue
+            unsupported = directive.get("unsupported")
+            if not isinstance(unsupported, dict):
+                unsupported = {}
+            for plural, bindings_key in (
+                ("facts", "fact_bindings"),
+                ("outcomes", "outcome_bindings"),
+                ("pending", "pending_bindings"),
+            ):
+                existing = {
+                    str(binding.get("claim") or "")
+                    for binding in event.get(bindings_key) or []
+                    if isinstance(binding, dict)
+                }
+                removals = {
+                    str(claim).strip()
+                    for claim in unsupported.get(plural) or []
+                    if str(claim).strip() in existing
+                }
+                event[plural] = [
+                    claim for claim in event.get(plural) or [] if claim not in removals
+                ]
+                event[bindings_key] = [
+                    binding
+                    for binding in event.get(bindings_key) or []
+                    if binding.get("claim") not in removals
+                ]
+            current_status = str(event.get("status") or "discussed")
+            requested_status = str(directive.get("status") or current_status).lower()
+            if (
+                requested_status in status_rank
+                and status_rank[requested_status] <= status_rank.get(current_status, 2)
+            ):
+                event["status"] = requested_status
+            if event.get("facts"):
+                verified.append(event)
+            verified_count += 1
+        return verified, verified_count
+
+    async def _verify_major_events(
+        self,
+        report: Dict[str, Any],
+        messages: List[dict],
+    ) -> Dict[str, Any]:
+        major, minor = partition_events(report.get("events") or [])
+        if not major:
+            report["verification"] = {"requested": 0, "verified": 0, "fallback": 0}
+            return report
+        if not self.verify_model:
+            report["verification"] = {
+                "requested": len(major),
+                "verified": 0,
+                "fallback": len(major),
+            }
+            return report
+        batches = [
+            major[index : index + _MAJOR_REFINE_BATCH_SIZE]
+            for index in range(0, len(major), _MAJOR_REFINE_BATCH_SIZE)
+        ]
+        outcomes = await asyncio.gather(
+            *(self._verify_major_batch(batch, messages) for batch in batches)
+        )
+        verified_major = [event for events, _ in outcomes for event in events]
+        verified_count = sum(count for _, count in outcomes)
+        combined = verified_major + minor
+        combined.sort(
+            key=lambda item: (
+                str(item.get("start_time") or ""),
+                str(item.get("end_time") or ""),
+                str(item.get("title") or ""),
+            )
+        )
+        report["events"] = combined
+        report["verification"] = {
+            "requested": len(major),
+            "verified": verified_count,
+            "fallback": len(major) - verified_count,
+        }
+        return report
+
+    def _event_range(self, messages: List[dict]) -> Dict[str, Any]:
+        timestamps = [
+            float(message.get("time") or 0)
+            for message in messages
+            if float(message.get("time") or 0) > 0
+        ]
+        if not timestamps:
+            return {
+                "start_time": "?",
+                "end_time": "?",
+                "message_count": len(messages),
+            }
+        return {
+            "start_time": self._event_datetime(min(timestamps)).strftime("%H:%M"),
+            "end_time": self._event_datetime(max(timestamps)).strftime("%H:%M"),
+            "message_count": len(messages),
+        }
+
+    async def _extract_event_chunk_resilient(
+        self,
+        messages: List[dict],
+        *,
+        max_anchors: int,
+        include_links: bool,
+        detail_level: str,
+        chunk_label: str,
+        chunk_count: int,
+        retry_count: int,
+        split_on_timeout: bool,
+        split_depth: int = 0,
+    ) -> List[Dict[str, Any]]:
+        """失败时重试；仍失败则把当前时段一分为二，绝不静默吞掉缺失区间。"""
+
+        retries = max(0, min(3, int(retry_count or 0)))
+        for attempt in range(retries + 1):
+            report = await self._extract_event_chunk(
+                messages,
+                max_anchors=max_anchors,
+                include_links=include_links,
+                detail_level=detail_level,
+                chunk_label=chunk_label,
+                chunk_count=chunk_count,
+            )
+            if report is not None:
+                return [
+                    {
+                        "success": True,
+                        "report": report,
+                        "message_count": len(messages),
+                        "retried": attempt > 0,
+                        "from_split": split_depth > 0,
+                        **self._event_range(messages),
+                    }
+                ]
+
+        can_split = (
+            split_on_timeout
+            and split_depth < 1
+            and len(messages) >= 40
+        )
+        if can_split:
+            midpoint = len(messages) // 2
+            left, right = messages[:midpoint], messages[midpoint:]
+            nested = await asyncio.gather(
+                self._extract_event_chunk_resilient(
+                    left,
+                    max_anchors=max_anchors,
+                    include_links=include_links,
+                    detail_level=detail_level,
+                    chunk_label=f"{chunk_label}.1",
+                    chunk_count=chunk_count,
+                    retry_count=retry_count,
+                    split_on_timeout=split_on_timeout,
+                    split_depth=split_depth + 1,
+                ),
+                self._extract_event_chunk_resilient(
+                    right,
+                    max_anchors=max_anchors,
+                    include_links=include_links,
+                    detail_level=detail_level,
+                    chunk_label=f"{chunk_label}.2",
+                    chunk_count=chunk_count,
+                    retry_count=retry_count,
+                    split_on_timeout=split_on_timeout,
+                    split_depth=split_depth + 1,
+                ),
+            )
+            return [item for group in nested for item in group]
+
+        return [
+            {
+                "success": False,
+                "report": {"overview": "", "events": []},
+                "retried": retries > 0,
+                "from_split": split_depth > 0,
+                **self._event_range(messages),
+            }
+        ]
 
     async def analyze_group_event_report(
         self,
         messages: List[dict],
         *,
         max_events: int = 8,
+        max_minor_events: int = 0,
         max_anchors: int = 2,
         max_input_messages: int = 1200,
         include_links: bool = True,
+        coverage_mode: str = "balanced",
+        detail_level: str = "standard",
+        chunk_messages: int = _EVENT_CHUNK_MESSAGES,
+        chunk_characters: int = _EVENT_CHUNK_CHARACTERS,
+        retry_count: int = 2,
+        split_on_timeout: bool = True,
+        refine_major_events: bool = True,
     ) -> Dict[str, Any]:
-        """按全天时间线生成结构化群聊事件日报。"""
+        """全量建立轻量话题索引，再按需精炼主要事件。"""
 
         usable = [
             message
@@ -618,445 +1258,151 @@ class AnalysisService:
             and not message.get("is_command")
             and not message.get("is_notify")
         ]
-        sampled = len(usable) > max_input_messages > 0
-        selected = self._select_time_balanced_messages(usable, max_input_messages)
-        chunks = self._chunk_event_messages(selected)
+        full_coverage = coverage_mode == "full"
+        selected = (
+            list(usable)
+            if full_coverage
+            else self._select_time_balanced_messages(usable, max_input_messages)
+        )
+        sampled = len(selected) < len(usable)
+        chunks = self._chunk_event_messages(
+            selected,
+            max_messages=chunk_messages,
+            max_characters=chunk_characters,
+        )
         if not chunks:
             return {
                 "overview": "",
                 "events": [],
                 "sampled": sampled,
                 "analyzed_message_count": 0,
+                "partial": False,
+                "coverage": {
+                    "mode": coverage_mode,
+                    "total_messages": len(usable),
+                    "selected_messages": len(selected),
+                    "analyzed_messages": 0,
+                    "coverage_percent": 0.0,
+                    "chunks_total": 0,
+                    "chunks_success": 0,
+                    "chunks_failed": 0,
+                    "retry_success": 0,
+                    "split_chunks": 0,
+                    "failed_ranges": [],
+                },
             }
 
-        reports: List[Dict[str, Any]] = []
-        for index, chunk in enumerate(chunks, start=1):
-            report = await self._extract_event_chunk(
-                chunk,
-                max_events=max_events,
+        nested_outcomes = await asyncio.gather(
+            *(
+                self._extract_event_chunk_resilient(
+                    chunk,
+                    max_anchors=max_anchors,
+                    include_links=include_links,
+                    detail_level=detail_level,
+                    chunk_label=str(index),
+                    chunk_count=len(chunks),
+                    retry_count=retry_count,
+                    split_on_timeout=split_on_timeout,
+                )
+                for index, chunk in enumerate(chunks, start=1)
+            )
+        )
+        outcomes = [item for group in nested_outcomes for item in group]
+        successful = [item for item in outcomes if item.get("success")]
+        failed = [item for item in outcomes if not item.get("success")]
+        reports = [item["report"] for item in successful]
+
+        if not reports:
+            merged = {"overview": "", "events": []}
+        else:
+            # 两种覆盖模式都使用本地确定性合并。第一阶段不再增加一次全局模型
+            # 合并调用，避免额外模型请求成为新的超时点。
+            merged = merge_event_reports_fallback(
+                reports,
+                max_events=_EVENT_CANDIDATE_HARD_LIMIT,
+                max_minor_events=_EVENT_CANDIDATE_HARD_LIMIT,
                 max_anchors=max_anchors,
                 include_links=include_links,
-                chunk_index=index,
-                chunk_count=len(chunks),
             )
-            reports.append(report)
-
-        merged = await self._merge_event_candidates(
-            reports,
-            max_events=max_events,
-            max_anchors=max_anchors,
-            include_links=include_links,
-        )
-        merged = self._ground_event_report(
+        merged = self._prepare_event_candidates(
             merged,
             selected,
             max_events=max_events,
+            max_minor_events=max_minor_events,
             max_anchors=max_anchors,
             include_links=include_links,
         )
+        if refine_major_events and merged.get("events"):
+            merged = await self._refine_major_events(
+                merged,
+                selected,
+                max_anchors=max_anchors,
+                include_links=include_links,
+                detail_level=detail_level,
+            )
+        else:
+            major, _ = partition_events(merged.get("events") or [])
+            merged["refinement"] = {
+                "requested": len(major),
+                "refined": 0,
+                "fallback": len(major),
+            }
+        merged = await self._verify_major_events(merged, selected)
+        analyzed_messages = sum(
+            int(item.get("message_count") or 0) for item in successful
+        )
+        coverage_percent = (
+            min(100.0, analyzed_messages * 100.0 / len(usable))
+            if usable
+            else 100.0
+        )
+        failed_ranges = [
+            {
+                "start_time": item.get("start_time") or "?",
+                "end_time": item.get("end_time") or "?",
+                "message_count": int(item.get("message_count") or 0),
+            }
+            for item in failed
+        ]
         merged["sampled"] = sampled
-        merged["analyzed_message_count"] = len(selected)
+        merged["partial"] = bool(failed)
+        merged["analyzed_message_count"] = analyzed_messages
+        merged["coverage"] = {
+            "mode": coverage_mode,
+            "total_messages": len(usable),
+            "selected_messages": len(selected),
+            "analyzed_messages": analyzed_messages,
+            "coverage_percent": round(coverage_percent, 1),
+            "chunks_total": len(outcomes),
+            "chunks_success": len(successful),
+            "chunks_failed": len(failed),
+            "retry_success": sum(
+                1 for item in successful if item.get("retried")
+            ),
+            "split_chunks": sum(
+                1 for item in outcomes if item.get("from_split")
+            ),
+            "failed_ranges": failed_ranges,
+        }
         return merged
 
-    # ==================== 群聊整体分析（LLM） ====================
-
-    async def analyze_group_summary(self, messages: List[dict], message_count: int) -> Optional[str]:
-        """调用 LLM 生成群聊故事化总结文本（自动读取机器人人设）。"""
-        try:
-            # 取最近若干条参与总结，避免超大群 prompt 过长导致生成超时
-            recent = messages[-_MAX_INPUT_MESSAGES:]
-            chat_text = self.format_messages(recent)
-
-            bot_name = await self.ctx.config.get("bot.nickname", "麦麦")
-            personality = await self.ctx.config.get("personality.personality", "")
-            reply_style = await self.ctx.config.get("personality.reply_style", "")
-
-            participants = {
-                msg.get("user_nickname", "") for msg in messages if msg.get("user_nickname")
-            }
-
-            prompt = f"""你是{bot_name}。{personality}
-{reply_style}
-
-以下是群聊记录（{message_count}条消息，{len(participants)}人参与）：
-{chat_text}
-
-请像给朋友讲故事一样复述群里发生了什么。
-
-要求：
-1. 按时间顺序讲，保持连贯性
-2. 精彩内容详细说，平淡内容略过
-3. 对话要说清谁说了什么、谁怎么回的
-4. 必须有具体人名和具体内容，不要抽象描述
-5. 口语化，不要用"首先""其次""然后""总之"这类词
-6. 控制在 300 字以内，简明扼要
-
-直接开始，不要标题。"""
-
-            summary = await self._llm(
-                prompt, request_type="plugin.chat_summary", max_tokens=_SUMMARY_MAX_TOKENS
-            )
-            return summary.strip() if summary else None
-        except Exception as e:
-            self.logger.error(f"生成群聊总结文本出错: {e}", exc_info=True)
-            return None
-
-    async def analyze_topics(self, messages: List[dict]) -> List[Dict]:
-        """使用 LLM 分析聊天话题，返回 [{topic, contributors, detail}, ...]"""
-        try:
-            if not messages:
-                return []
-
-            messages = messages[-_MAX_INPUT_MESSAGES:]
-            text_messages = []
-            for msg in messages:
-                nickname = msg.get("user_nickname", "未知用户")
-                cardname = msg.get("user_cardname", "")
-                display_name = cardname if cardname else nickname
-                text = msg.get("processed_plain_text") or ""
-                timestamp = msg.get("time", 0)
-                time_str = datetime.fromtimestamp(timestamp).strftime("%H:%M")
-
-                text = re.sub(r"@[^<\s]+<\d+>\s*", "", text).strip()
-
-                if len(text) > 2 and not text.startswith("/"):
-                    text_messages.append({"sender": display_name, "time": time_str, "content": text})
-
-            if not text_messages:
-                return []
-
-            messages_text = "\n".join(
-                f"[{m['time']}] {m['sender']}: {m['content']}" for m in text_messages
-            )
-
-            prompt = f"""从群聊记录中提取3-5个热门话题。
-
-群聊记录：
-{messages_text}
-
-要求：
-1. 话题标题4-8个字，简洁明了
-2. 参与者列表包含2-5个主要发言人
-3. 详情描述50-80字，说明讨论了什么、有什么有趣的观点
-4. 只提取有实质内容的话题，避免简单问候、闲聊
-5. 话题按热度排序（参与人数多、讨论深入的优先）
-
-返回JSON（不要markdown代码块，不要emoji）：
-[
-  {{
-    "topic": "话题标题",
-    "contributors": ["参与者1", "参与者2"],
-    "detail": "话题详情描述"
-  }}
-]"""
-
-            result = await self._llm(prompt, request_type="plugin.chat_summary.topics")
-            if result is None:
-                return []
-            return self._validate_topics(self._parse_llm_json(result))
-
-        except Exception as e:
-            self.logger.error(f"分析话题失败: {e}", exc_info=True)
-            return []
-
-    async def analyze_user_titles(self, messages: List[dict], user_stats: Dict) -> List[Dict]:
-        """使用 LLM 分析群友称号（含 MBTI），返回 [{name, title, mbti, reason, user_id}, ...]"""
-        try:
-            active_users = {
-                uid: stats
-                for uid, stats in user_stats.items()
-                if stats["message_count"] >= AnalysisConfig.MIN_MESSAGES_FOR_TITLE
-            }
-            if not active_users:
-                return []
-
-            users_text = []
-            user_samples: Dict[str, List[str]] = {}
-
-            for msg in messages:
-                user_id = str(msg.get("user_id", ""))
-                if user_id not in active_users:
-                    continue
-                text = msg.get("processed_plain_text") or ""
-                if len(text) < 5:
-                    continue
-                user_samples.setdefault(user_id, [])
-                if len(user_samples[user_id]) < 5:
-                    user_samples[user_id].append(text[:60])
-
-            for user_id, stats in sorted(
-                active_users.items(), key=lambda x: x[1]["message_count"], reverse=True
-            )[: AnalysisConfig.MAX_USERS_FOR_TITLE]:
-                night_messages = sum(stats["hours"][h] for h in range(0, 6))
-                avg_chars = stats["char_count"] / stats["message_count"] if stats["message_count"] else 0
-                emoji_ratio = stats["emoji_count"] / stats["message_count"] if stats["message_count"] else 0
-                night_ratio = night_messages / stats["message_count"] if stats["message_count"] else 0
-
-                samples = user_samples.get(user_id, [])
-                samples_text = "\n  ".join(f"- {s}" for s in samples) if samples else "  (无有效样本)"
-
-                users_text.append(
-                    f"【{stats['nickname']}】\n"
-                    f"  发言{stats['message_count']}条, 平均{avg_chars:.1f}字, "
-                    f"表情比例{emoji_ratio:.2f}, 夜间发言比例{night_ratio:.2f}\n"
-                    f"  发言样本：\n  {samples_text}"
-                )
-
-            users_info = "\n\n".join(users_text)
-
-            prompt = f"""根据群友数据创造有趣的称号，并判断MBTI类型。
-
-用户数据：
-{users_info}
-
-要求：
-1. 称号2-4个汉字
-2. MBTI类型基于发言特征判断（如ENFP、INTJ等16种之一）
-   - E/I: 外向(话多、互动多) vs 内向(话少、深度思考)
-   - S/N: 实感(具体事实) vs 直觉(抽象概念)
-   - T/F: 思考(逻辑理性) vs 情感(感性表达)
-   - J/P: 判断(有条理) vs 知觉(随性自由)
-3. 基于真实数据，不要编造
-4. 避免重复类型（不要多个"龙王""话痨"）
-5. 有创意，避免陈词滥调
-6. **理由必须写满60-80字，引用具体数据说明为什么（发言数、平均字数、表情比例、夜间比例等），不要空洞，要详细**
-
-参考分类：活跃度（龙王、潜水员）、时间特征（夜猫子）、内容风格（段子手）、表情/情绪（表情帝）、互动特征（接梗高手）
-
-返回JSON（不要markdown代码块，不要emoji）：
-[
-  {{
-    "name": "用户名",
-    "title": "称号（2-4字）",
-    "mbti": "MBTI类型（如ENFP）",
-    "reason": "获得理由,必须60-80字,引用数据"
-  }}
-]"""
-
-            result = await self._llm(
-                prompt, request_type="plugin.chat_summary.titles",
-                max_tokens=_MULTI_USER_JSON_MAX_TOKENS,
-            )
-            if result is None:
-                return []
-            return self._validate_titles(self._parse_llm_json(result), user_stats)
-
-        except Exception as e:
-            self.logger.error(f"分析群友称号失败: {e}", exc_info=True)
-            return []
-
-    async def analyze_golden_quotes(self, messages: List[dict]) -> List[Dict]:
-        """使用 LLM 提取群聊金句，返回 [{content, sender, reason}, ...]"""
-        try:
-            messages = messages[-_MAX_INPUT_MESSAGES:]
-            interesting_messages = []
-            for msg in messages:
-                nickname = msg.get("user_nickname", "未知用户")
-                cardname = msg.get("user_cardname", "")
-                display_name = cardname if cardname else nickname
-                text = msg.get("processed_plain_text") or ""
-                timestamp = msg.get("time", 0)
-                time_str = datetime.fromtimestamp(timestamp).strftime("%H:%M")
-
-                text = re.sub(r"@[^<\s]+<\d+>\s*", "", text).strip()
-
-                if (
-                    AnalysisConfig.MIN_QUOTE_LENGTH <= len(text) <= AnalysisConfig.MAX_QUOTE_LENGTH
-                    and not text.startswith(("http", "www", "/"))
-                ):
-                    interesting_messages.append({"sender": display_name, "time": time_str, "content": text})
-
-            if not interesting_messages:
-                return []
-
-            messages_text = "\n".join(
-                f"[{m['time']}] {m['sender']}: {m['content']}" for m in interesting_messages
-            )
-
-            prompt = f"""从群聊记录中挑选3-5句最有趣的金句。
-
-优先级（从高到低）：
-1. 神回复、接梗高手（优先选择回复的那句，不是发起的）
-2. 有上下文才有笑点的梗
-3. 精彩吐槽或离谱观点
-4. 高/低情商发言
-
-要求：
-- 每个金句来自不同发言人
-- 避免平淡陈述句、问候语
-- 内容水可以只返回2-3个
-- 理由严格控制在50-70字，说明为什么有趣、回应了什么
-
-群聊记录：
-{messages_text}
-
-返回JSON（不要markdown代码块，不要emoji）：
-[
-  {{
-    "content": "金句原文",
-    "sender": "发言人",
-    "reason": "选择理由（50-70字）"
-  }}
-]"""
-
-            result = await self._llm(prompt, request_type="plugin.chat_summary.quotes")
-            if result is None:
-                return []
-            return self._validate_quotes(self._parse_llm_json(result))
-
-        except Exception as e:
-            self.logger.error(f"分析金句失败: {e}", exc_info=True)
-            return []
-
-    async def analyze_depression_index(self, messages: List[dict], user_stats: Dict) -> List[Dict]:
-        """使用 LLM 分析群友炫压抑指数，返回按 score 降序的 [{name, user_id, rank, score, comment}, ...]"""
-        try:
-            active_users = {
-                uid: stats
-                for uid, stats in user_stats.items()
-                if stats["message_count"] >= AnalysisConfig.MIN_MESSAGES_FOR_TITLE
-            }
-            if not active_users:
-                return []
-
-            user_messages: Dict[str, List[str]] = {}
-            for msg in messages:
-                user_id = str(msg.get("user_id", ""))
-                if user_id not in active_users:
-                    continue
-                text = msg.get("processed_plain_text") or ""
-                if len(text) < 5:
-                    continue
-                user_messages.setdefault(user_id, [])
-                if len(user_messages[user_id]) < 20:
-                    user_messages[user_id].append(text)
-
-            if not user_messages:
-                return []
-
-            users_sample = []
-            for user_id in sorted(
-                user_messages.keys(), key=lambda uid: active_users[uid]["message_count"], reverse=True
-            ):
-                nickname = active_users[user_id]["nickname"]
-                sample_texts = user_messages[user_id][:10]
-                users_sample.append(
-                    f"【{nickname}】\n" + "\n".join(f"  - {t[:60]}" for t in sample_texts)
-                )
-
-            users_info = "\n\n".join(users_sample)
-
-            prompt = f"""分析群友的"炫压抑"指数（娱乐向）。炫压抑=性欲望强烈但表达受抑制的失衡状态。
-
-用户发言样本：
-{users_info}
-
-评级标准（分数越高越压抑）：
-- S级(121-150分)：想色色但欲言又止,或疯狂发涩图/开黄腔(过度补偿)。150分=极度压抑爆发，121分=明显压抑
-- A级(91-120分)：经常想开车但克制扭捏。120分=频繁压抑，91分=较常压抑
-- B级(61-90分)：偶尔开车,表达自然。90分=偶尔有想法，61分=基本正常
-- C级(31-60分)：很少提及或表达健康。60分=偶尔提及，31分=几乎不提
-- D级(0-30分)：完全回避性话题。30分=刻意回避，0分=完全无关
-
-要求：
-1. 对所有用户进行评级，评价25-30字，采用文言文风格，文雅而有趣
-2. 每个用户必须给出一个0-150的精确分数(score)，用于排名
-3. 分数要能区分同等级内的差异，例如同为S级，更压抑的给145分，稍轻的给125分
-4. 按分数从高到低排序返回
-
-返回JSON（不要markdown代码块，不要emoji）：
-[
-  {{
-    "name": "用户名",
-    "rank": "S/A/B/C/D",
-    "score": 0-150的整数分数,
-    "comment": "简短评价"
-  }}
-]"""
-
-            result = await self._llm(
-                prompt, request_type="plugin.chat_summary.depression",
-                max_tokens=_MULTI_USER_JSON_MAX_TOKENS,
-            )
-            if result is None:
-                return []
-            return self._validate_depression_index(self._parse_llm_json(result), user_stats)
-
-        except Exception as e:
-            self.logger.error(f"分析炫压抑指数失败: {e}", exc_info=True)
-            return []
-
     # ==================== 单用户分析（LLM） ====================
-
-    async def analyze_single_user_summary(
-        self, user_messages: List[dict], user_name: str, user_id: str
-    ) -> Optional[str]:
-        """生成单用户 AI 总结（只使用该用户的消息）"""
-        try:
-            if not user_messages:
-                return None
-
-            formatted_messages = []
-            for msg in user_messages:
-                timestamp = msg.get("time", 0)
-                time_str = datetime.fromtimestamp(timestamp).strftime("%H:%M")
-                text = msg.get("processed_plain_text") or ""
-                if text:
-                    formatted_messages.append(f"[{time_str}] {text}")
-
-            if not formatted_messages:
-                return None
-
-            if len(formatted_messages) > 50:
-                mid = len(formatted_messages) // 2
-                sample_messages = (
-                    formatted_messages[:20]
-                    + formatted_messages[mid - 5 : mid + 5]
-                    + formatted_messages[-20:]
-                )
-            else:
-                sample_messages = formatted_messages
-
-            messages_text = "\n".join(sample_messages)
-
-            prompt = f"""请根据以下聊天记录，为用户"{user_name}"生成一段今日总结。
-
-这是{user_name}今天在群里的发言记录：
-{messages_text}
-
-要求：
-1. 总结这个用户今天聊了什么话题、表达了什么观点
-2. 描述用户今天的活跃程度和情绪状态
-3. 用轻松有趣的语气，像朋友聊天一样
-4. 字数控制在80-150字
-5. 不要使用emoji
-6. 直接输出总结文本，不要加任何前缀或标题"""
-
-            result = await self._llm(
-                prompt, request_type="plugin.chat_summary.single_user_summary",
-                max_tokens=_SUMMARY_MAX_TOKENS,
-            )
-            if result is None:
-                return None
-            return result.strip()
-
-        except Exception as e:
-            self.logger.error(f"生成单用户总结失败: {e}", exc_info=True)
-            return None
 
     async def analyze_single_user_portrait(
         self, user_messages: List[dict], user_name: str, user_id: str
     ) -> Optional[Dict]:
-        """生成单用户群友画像（只使用该用户的消息）"""
+        """生成只描述可观察事实的单用户画像。"""
         try:
-            if not user_messages or len(user_messages) < 3:
+            if not user_messages:
                 return None
 
             samples = []
             for msg in user_messages:
-                text = msg.get("processed_plain_text") or ""
-                if len(text) >= 5 and len(samples) < 10:
-                    samples.append(text[:80])
+                text = re.sub(
+                    r"\s+", " ", str(msg.get("processed_plain_text") or "")
+                ).strip()
+                if len(text) >= 5 and len(samples) < 20:
+                    samples.append(text[:160])
 
             if not samples:
                 return None
@@ -1067,34 +1413,46 @@ class AnalysisService:
             avg_chars = stats["char_count"] / stats["message_count"] if stats["message_count"] else 0
             emoji_ratio = stats["emoji_count"] / stats["message_count"] if stats["message_count"] else 0
             hours = stats["hours"]
-            night_messages = sum(hours[h] for h in range(0, 6))
-            night_ratio = night_messages / stats["message_count"] if stats["message_count"] else 0
+            peak_hour = max(range(24), key=lambda hour: hours[hour])
+            activity_pattern = (
+                f"样本中 {peak_hour:02d}:00—{(peak_hour + 1) % 24:02d}:00 发言最多，"
+                f"共 {hours[peak_hour]} 条"
+            )
 
-            prompt = f"""根据用户数据生成群友画像。
+            prompt = f"""根据下面明确给出的个人发言样本和本地统计，生成事实型群聊画像。
 
 用户：{user_name}
 发言数：{stats['message_count']}条
 平均字数：{avg_chars:.1f}字/条
 表情比例：{emoji_ratio:.2f}
-夜间发言比例：{night_ratio:.2f}
+活跃时段事实：{activity_pattern}
 
 发言样本：
 {samples_text}
 
-要求：
-1. title: 称号（2-4个汉字），有趣且贴切
-2. mbti: MBTI类型（如ENFP），基于发言特征判断
-3. reason: 画像描述（60-80字），引用具体数据，有趣但不失真实
+硬性要求：
+1. 只描述样本中能直接观察到的话题和表达方式，不推断 MBTI、心理状态、隐藏动机、
+   职业、地域、年龄、性别、健康状况或其他敏感属性。
+2. 明确区分“发言中提到”“提出建议”“表示准备做”和“实际完成”，不得把前者写成完成事实。
+3. evidence_points 每项都要逐字复制一段真实短原话，并给出仅由该原话支持的观察。
+4. summary 为 60—120 字事实型概括；communication_style 只描述可观察的句式、长度、
+   提问/陈述倾向，不作性格评价。
 
 返回JSON（不要markdown代码块，不要emoji）：
 {{
   "name": "{user_name}",
-  "title": "称号",
-  "mbti": "MBTI类型",
-  "reason": "画像描述"
+  "summary": "事实型概括",
+  "topics": ["样本中实际讨论的话题"],
+  "communication_style": "可观察表达特点",
+  "evidence_points": [{{"quote": "真实短原话", "observation": "由原话直接支持的观察"}}]
 }}"""
 
-            result = await self._llm(prompt, request_type="plugin.chat_summary.single_user_portrait")
+            result = await self._llm(
+                prompt,
+                request_type="plugin.chat_summary.single_user_portrait",
+                temperature=0.2,
+                model_task=self.user_profile_model,
+            )
             if result is None:
                 return None
 
@@ -1102,304 +1460,47 @@ class AnalysisService:
             if not data:
                 return None
 
+            raw_topics = data.get("topics")
+            topics = []
+            if isinstance(raw_topics, list):
+                for item in raw_topics:
+                    topic = re.sub(r"\s+", " ", str(item or "")).strip()[:40]
+                    if topic and topic not in topics:
+                        topics.append(topic)
+                    if len(topics) >= 6:
+                        break
+            evidence_points = []
+            for item in data.get("evidence_points") or []:
+                if not isinstance(item, dict):
+                    continue
+                quote = re.sub(r"\s+", " ", str(item.get("quote") or "")).strip()[:100]
+                observation = re.sub(
+                    r"\s+", " ", str(item.get("observation") or "")
+                ).strip()[:140]
+                if quote and observation and any(quote in sample for sample in samples):
+                    evidence_points.append(
+                        {"quote": quote, "observation": observation}
+                    )
+                if len(evidence_points) >= 4:
+                    break
+
             return {
                 "name": str(data.get("name", user_name))[:50],
-                "title": str(data.get("title", ""))[: AnalysisConfig.MAX_TITLE_LENGTH],
-                "mbti": str(data.get("mbti", "")).upper().strip()[:8],
-                "reason": str(data.get("reason", ""))[: AnalysisConfig.MAX_REASON_LENGTH],
+                "summary": re.sub(
+                    r"\s+", " ", str(data.get("summary") or "")
+                ).strip()[:240],
+                "topics": topics,
+                "activity_pattern": activity_pattern,
+                "communication_style": re.sub(
+                    r"\s+", " ", str(data.get("communication_style") or "")
+                ).strip()[:180],
+                "evidence_points": evidence_points,
                 "user_id": user_id,
             }
 
         except Exception as e:
             self.logger.error(f"生成单用户画像失败: {e}", exc_info=True)
             return None
-
-    async def analyze_single_user_depression(
-        self, user_messages: List[dict], user_name: str, user_id: str
-    ) -> Optional[Dict]:
-        """生成单用户炫压抑评级（只使用该用户的消息）"""
-        try:
-            if not user_messages or len(user_messages) < 3:
-                return None
-
-            samples = []
-            for msg in user_messages:
-                text = msg.get("processed_plain_text") or ""
-                if len(text) >= 5 and len(samples) < 15:
-                    samples.append(text[:100])
-
-            if not samples:
-                return None
-
-            samples_text = "\n".join(f"- {s}" for s in samples)
-
-            prompt = f"""分析用户的"炫压抑"指数（娱乐向）。炫压抑=性欲望强烈但表达受抑制的失衡状态。
-
-用户：{user_name}
-发言样本：
-{samples_text}
-
-评级标准：
-- S级(121-150分)：想色色但欲言又止,或疯狂发涩图/开黄腔(过度补偿)
-- A级(91-120分)：经常想开车但克制扭捏
-- B级(61-90分)：偶尔开车,表达自然
-- C级(31-60分)：很少提及或表达健康
-- D级(0-30分)：完全回避性话题
-
-要求：
-1. 评价25-30字，采用文言文风格，文雅而有趣
-2. 必须给出一个0-150的精确分数(score)
-
-返回JSON（不要markdown代码块，不要emoji）：
-{{
-  "name": "{user_name}",
-  "rank": "S/A/B/C/D",
-  "score": 0-150的整数分数,
-  "comment": "简短评价"
-}}"""
-
-            result = await self._llm(prompt, request_type="plugin.chat_summary.single_user_depression")
-            if result is None:
-                return None
-
-            data = self._parse_llm_json_object(result)
-            if not data:
-                return None
-
-            # 校验 rank（必须是 S/A/B/C/D，否则模板 rank-{{rank}} 的样式会丢失）
-            rank = str(data.get("rank", "C")).upper().strip()
-            if rank not in ("S", "A", "B", "C", "D"):
-                rank = "C"
-            try:
-                score = int(data.get("score", 0))
-                score = max(0, min(150, score))
-            except (ValueError, TypeError):
-                rank_default_scores = {"S": 135, "A": 105, "B": 75, "C": 45, "D": 15}
-                score = rank_default_scores.get(rank, 75)
-
-            return {
-                "name": str(data.get("name", user_name))[:50],
-                "rank": rank,
-                "score": score,
-                "comment": str(data.get("comment", ""))[:80],
-                "user_id": user_id,
-            }
-
-        except Exception as e:
-            self.logger.error(f"生成单用户炫压抑评级失败: {e}", exc_info=True)
-            return None
-
-    async def analyze_single_user_quotes(
-        self, user_messages: List[dict], user_name: str, user_id: str
-    ) -> Optional[List[Dict]]:
-        """提取单用户金句（只使用该用户的消息）"""
-        try:
-            if not user_messages or len(user_messages) < 5:
-                return None
-
-            valid_messages = []
-            for msg in user_messages:
-                text = msg.get("processed_plain_text") or ""
-                if 8 <= len(text) <= 100:
-                    valid_messages.append(text)
-
-            if len(valid_messages) < 5:
-                return None
-
-            if len(valid_messages) > 30:
-                valid_messages = valid_messages[:30]
-
-            messages_text = "\n".join(f"- {m}" for m in valid_messages)
-
-            prompt = f"""从用户发言中挑选1-2条最有趣/最有深度/最搞笑的金句。
-
-用户：{user_name}
-发言列表：
-{messages_text}
-
-要求：
-1. 挑选真正有趣、有梗、有深度的发言
-2. 每条金句配一个简短的点评理由（10-15字）
-3. 如果没有特别出彩的发言，可以只返回1条或空数组
-
-返回JSON（不要markdown代码块，不要emoji）：
-[
-  {{
-    "content": "金句内容",
-    "reason": "点评理由"
-  }}
-]"""
-
-            result = await self._llm(prompt, request_type="plugin.chat_summary.single_user_quotes")
-            if result is None:
-                return None
-
-            data = self._parse_llm_json(result)
-            if not data:
-                return None
-
-            quotes = []
-            for item in data[:2]:
-                if isinstance(item, dict) and item.get("content") and item.get("reason"):
-                    quotes.append(
-                        {
-                            "content": str(item["content"])[:100],
-                            "reason": str(item["reason"])[:30],
-                            "sender": user_name,
-                        }
-                    )
-
-            return quotes if quotes else None
-
-        except Exception as e:
-            self.logger.error(f"生成单用户金句失败: {e}", exc_info=True)
-            return None
-
-    # ==================== 校验函数（静态） ====================
-
-    @staticmethod
-    def _validate_topics(data: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        validated = []
-        for item in data:
-            if not isinstance(item, dict):
-                continue
-            if not all(key in item for key in ["topic", "contributors", "detail"]):
-                continue
-
-            topic = str(item["topic"])[:30]
-            detail = str(item["detail"])[:200]
-            contributors = item.get("contributors", [])
-            if not isinstance(contributors, list):
-                contributors = []
-            contributors = [str(c).strip()[:20] for c in contributors if c and str(c).strip()][:5]
-
-            if not topic or not detail or not contributors:
-                continue
-
-            validated.append({"topic": topic, "contributors": contributors, "detail": detail})
-
-        return validated[:5]
-
-    @staticmethod
-    def _validate_titles(
-        data: List[Dict[str, Any]], user_stats: Optional[Dict[str, Dict]] = None
-    ) -> List[Dict[str, Any]]:
-        valid_mbti_types = {
-            "INTJ", "INTP", "ENTJ", "ENTP",
-            "INFJ", "INFP", "ENFJ", "ENFP",
-            "ISTJ", "ISFJ", "ESTJ", "ESFJ",
-            "ISTP", "ISFP", "ESTP", "ESFP",
-        }
-
-        validated = []
-        for item in data:
-            if not isinstance(item, dict):
-                continue
-            if not all(key in item for key in ["name", "title", "mbti", "reason"]):
-                continue
-
-            name = str(item["name"])[:50]
-            title = str(item["title"])[: AnalysisConfig.MAX_TITLE_LENGTH]
-            mbti = str(item["mbti"]).upper().strip()
-            reason = str(item["reason"])[: AnalysisConfig.MAX_REASON_LENGTH]
-
-            if mbti not in valid_mbti_types:
-                mbti = "ENFP"
-
-            if not name or not title or not reason:
-                continue
-
-            user_id = AnalysisService._match_user_id(name, user_stats)
-
-            validated.append(
-                {"name": name, "title": title, "mbti": mbti, "reason": reason, "user_id": user_id}
-            )
-
-        return validated
-
-    @staticmethod
-    def _match_user_id(name: str, user_stats: Optional[Dict[str, Dict]]) -> str:
-        """把 LLM 回传的名字匹配回 user_id（用于头像）。精确→去空白→互相包含，逐级放宽。"""
-        if not user_stats or not name:
-            return ""
-        target = str(name).strip()
-        # 1) 精确匹配
-        for uid, stats in user_stats.items():
-            if stats.get("nickname") == name:
-                return uid
-        # 2) 去空白后匹配
-        for uid, stats in user_stats.items():
-            if str(stats.get("nickname") or "").strip() == target:
-                return uid
-        # 3) 互相包含（LLM 截断/加书名号等）
-        for uid, stats in user_stats.items():
-            nick = str(stats.get("nickname") or "").strip()
-            if nick and (nick in target or target in nick):
-                return uid
-        return ""
-
-    @staticmethod
-    def _validate_quotes(data: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        validated = []
-        for item in data:
-            if not isinstance(item, dict):
-                continue
-            if not all(key in item for key in ["content", "sender", "reason"]):
-                continue
-
-            content = str(item["content"])[:200]
-            sender = str(item["sender"])[:50]
-            reason = str(item["reason"])[: AnalysisConfig.MAX_REASON_LENGTH]
-
-            content = re.sub(r"@[^<\s]+<\d+>\s*", "", content).strip()
-
-            if not content or not sender or not reason:
-                continue
-
-            validated.append({"content": content, "sender": sender, "reason": reason})
-
-        return validated
-
-    @staticmethod
-    def _validate_depression_index(
-        data: List[Dict[str, Any]], user_stats: Optional[Dict[str, Dict]] = None
-    ) -> List[Dict[str, Any]]:
-        validated = []
-        for item in data:
-            if not isinstance(item, dict):
-                continue
-            if not all(key in item for key in ["name", "rank", "comment"]):
-                continue
-
-            name = str(item["name"])[:50]
-            rank = str(item["rank"]).upper().strip()
-            comment = str(item["comment"])[:60]
-
-            if rank not in ["S", "A", "B", "C", "D"]:
-                continue
-            if not name or not rank or not comment:
-                continue
-
-            try:
-                score = int(item.get("score", 0))
-                score = max(0, min(150, score))
-            except (ValueError, TypeError):
-                rank_default_scores = {"S": 135, "A": 105, "B": 75, "C": 45, "D": 15}
-                score = rank_default_scores.get(rank, 75)
-
-            user_id = ""
-            if user_stats:
-                for uid, stats in user_stats.items():
-                    if stats.get("nickname") == name:
-                        user_id = uid
-                        break
-
-            validated.append(
-                {"name": name, "rank": rank, "score": score, "comment": comment, "user_id": user_id}
-            )
-
-        validated.sort(key=lambda x: x["score"], reverse=True)
-        return validated
 
     # ==================== LLM JSON 解析（静态） ====================
 
