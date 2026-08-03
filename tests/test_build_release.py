@@ -61,8 +61,11 @@ class ReleaseCopyTests(unittest.TestCase):
         self.assertIn("其他插件发往该群的消息", guide)
         self.assertLess(
             readme.index("麦麦安静写书"),
-            readme.index("维护者自用的新版本"),
+            readme.index("如果你想换一种用法"),
         )
+        self.assertIn("麦麦群安静插件", readme)
+        self.assertIn("麦麦最新改版插件 v3.6.0", readme)
+        self.assertIn("/mysummary", readme)
 
     def test_manifest_version_must_be_semver(self):
         self.assertEqual(validate_version("3.6.0"), "3.6.0")
