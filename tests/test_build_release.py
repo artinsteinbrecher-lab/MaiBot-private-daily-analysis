@@ -43,6 +43,21 @@ class ReleaseCopyTests(unittest.TestCase):
                 resolved = (markdown.parent / path_text).resolve()
                 self.assertTrue(resolved.exists(), f"broken link in {markdown}: {target}")
 
+    def test_legacy_silence_download_is_clearly_documented(self):
+        root = Path(__file__).resolve().parents[1]
+        legacy_doc = root / "docs" / "LEGACY_SILENCE.md"
+        if not legacy_doc.exists():
+            return
+
+        filename = "khiqwq_daily_analysis-v3.1.0-legacy-silence.zip"
+        download = f"/releases/download/v3.1.0/{filename}"
+        readme = (root / "README.md").read_text(encoding="utf-8")
+        guide = legacy_doc.read_text(encoding="utf-8")
+        self.assertIn(download, readme)
+        self.assertIn(download, guide)
+        self.assertIn("不能同时", readme)
+        self.assertIn("其他插件发往该群的消息", guide)
+
     def test_manifest_version_must_be_semver(self):
         self.assertEqual(validate_version("3.6.0"), "3.6.0")
         self.assertEqual(validate_version("3.7.0-rc.1"), "3.7.0-rc.1")

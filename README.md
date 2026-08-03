@@ -4,57 +4,84 @@
 
 维护仓库：[artinsteinbrecher-lab/MaiBot-private-daily-analysis](https://github.com/artinsteinbrecher-lab/MaiBot-private-daily-analysis)
 
-当前正式版本：[v3.6.0](https://github.com/artinsteinbrecher-lab/MaiBot-private-daily-analysis/releases/tag/v3.6.0) ·
-[查看全部 Release](https://github.com/artinsteinbrecher-lab/MaiBot-private-daily-analysis/releases)
+## 先看版本
 
-适用于 MaiBot 1.x / `maibot_sdk` 2.x 的事实型群聊日报插件。它读取明确配置的 QQ 群白名单，生成带时间戳和回查锚点的
-事实型群事件日报，并且只将进度、结果和错误发送到管理员 QQ 私聊。
+仓库现在保留两个版本号：
 
-## 文档导航
+- **v3.6.0 是当前版本**，下面分成普通版和增强版两个安装包。
+- **v3.1.0 是经典禁言版**，保留“总结和禁言放在同一个插件里”的旧做法。
 
-| 你的目标 | 从这里开始 |
-|---|---|
-| 第一次安装、只想直接使用 | [五分钟快速开始](#五分钟快速开始普通版) |
-| 了解普通版完整配置 | [普通版说明](packaging/standard/README.md) |
-| 给四个流程分别分配模型 | [增强版说明](packaging/multimodel/README.md) → [宿主扩展操作](extras/README.md) |
-| 选择四个任务的模型 | [模型分配建议](docs/MODEL_ASSIGNMENT.md) |
-| 遇到安装或运行问题 | [故障排查](#故障排查) → [获取支持](SUPPORT.md) |
-| 修改代码或发布版本 | [参与贡献](CONTRIBUTING.md) → [发布流程](docs/RELEASING.md) |
-| 浏览全部说明书 | [文档索引](docs/README.md) |
+[查看当前 v3.6.0 完整发行页](https://github.com/artinsteinbrecher-lab/MaiBot-private-daily-analysis/releases/tag/v3.6.0)
 
-## 下载选择
+如果你不知道该选哪个，直接选普通版。三个包使用同一个插件 ID，不能同时安装。
 
-- 普通用户：[下载 v3.6.0 standard](https://github.com/artinsteinbrecher-lab/MaiBot-private-daily-analysis/releases/download/v3.6.0/khiqwq_daily_analysis-v3.6.0-standard.zip)，只安装插件，不修改 MaiBot。
-- 多模型高级用户：[下载 v3.6.0 multimodel](https://github.com/artinsteinbrecher-lab/MaiBot-private-daily-analysis/releases/download/v3.6.0/khiqwq_daily_analysis-v3.6.0-multimodel.zip)，先按普通插件完成验证，再按 `extras/README.md` 检查并应用四任务路由。
-- 两个安装包使用完全相同的总结核心；差异只在是否附带 MaiBot 高级模型任务路由工具。
-- GitHub 自动生成的 Source code 压缩包是完整源码快照，不等同于普通插件安装包。
+## 普通版 v3.6.0
 
-本插件不再承担群聊静默。需要绝对静默时，请独立安装“QQ 群绝对静默守卫”插件。
-拆分后，静默规则与日报的模型调用、数据库读取、图片渲染和启停状态互不依赖。
+这是推荐给大多数人的版本。它会读取你指定的群，把当天发生的事情整理好，然后只发给管理员私聊。
 
-## 五分钟快速开始（普通版）
+你不需要修改 MaiBot，也不需要理解“模型任务”是什么。插件会直接使用 MaiBot 现在的默认回复模型。
 
-1. 下载上面的 standard ZIP，只解压其中唯一的顶层插件目录。
-2. 将该目录放入 MaiBot 插件目录。Docker 常见宿主路径为 `./data/MaiMBot/plugins/`；最终应能直接看到：
+[下载普通版 v3.6.0](https://github.com/artinsteinbrecher-lab/MaiBot-private-daily-analysis/releases/download/v3.6.0/khiqwq_daily_analysis-v3.6.0-standard.zip) ·
+[查看普通版完整说明](packaging/standard/README.md)
 
-   ```text
-   ./data/MaiMBot/plugins/<插件目录>/plugin.py
-   ./data/MaiMBot/plugins/<插件目录>/_manifest.json
-   ```
+### 普通版怎么安装
 
-   不要形成 `<插件目录>/<插件目录>/plugin.py` 的双层嵌套。
-3. 如果是升级已有安装，先备份原插件目录；替换程序文件时保留现有 `config.toml` 和独立插件数据目录。
-4. 在 MaiBot WebUI 的“插件管理”中加载插件，然后至少填写：
+1. 解压 ZIP，把里面唯一的插件文件夹放进 MaiBot 的插件目录。Docker 常见位置是 `./data/MaiMBot/plugins/`。
+2. 确认文件路径是 `<插件目录>/plugin.py`，不要多套一层同名文件夹。
+3. 在 MaiBot WebUI 里加载插件，填写要总结的群、接收日报的 QQ 和管理员 QQ。
+4. 保存并启用后，由管理员私聊机器人发送 `/summary 群号 今天`。
+5. 开始提示、处理进度、日报和完成提示都出现在管理员私聊，就说明安装成功。
 
-   - `auto_summary.target_chats`：允许读取的来源群；
-   - `auto_summary.recipient_user`：自动日报接收账号；
-   - `command_permission.admin_users`：允许操作的管理员账号，必须包含上述接收账号。
+升级旧安装时，先备份原插件目录，并保留已有的 `config.toml` 和插件数据目录。普通版安装到这里就结束，不要运行 `extras/` 中的脚本。
 
-5. 保存并启用后，确认日志出现“私聊群事件日报插件已加载”，再由管理员私聊发送 `/summary 群号 今天`。
+## 增强版 v3.6.0
 
-首次验证建议选择当天已有消息且达到 `min_messages` 的群。看到开始通知、处理进度、报告和完成通知均出现在管理员私聊，即表示普通版安装成功。standard 到这里已经完成，不需要执行 `extras/` 中的任何脚本。
+这是给已经接入多个模型、并且希望“不同工作交给不同模型”的用户准备的版本。例如：一个模型负责找事实，一个模型负责写成好读的日报，另一个模型负责复查。
 
-## 主要能力
+增强版和普通版的总结功能完全一样。它只是多带了一套修改 MaiBot 的工具。使用这套工具后，才可以在 MaiBot 里分别给四项工作选择模型。
+
+[下载增强版 v3.6.0](https://github.com/artinsteinbrecher-lab/MaiBot-private-daily-analysis/releases/download/v3.6.0/khiqwq_daily_analysis-v3.6.0-multimodel.zip) ·
+[查看增强版完整说明](packaging/multimodel/README.md)
+
+### 增强版怎么安装
+
+1. 解压增强版 ZIP，把插件文件夹放进 MaiBot 的插件目录。
+2. 先在 WebUI 里启用插件，并用 `/summary 群号 今天` 确认它能正常出日报。
+3. 如果你只想使用 MaiBot 默认模型，到这里就可以停止，不用修改 MaiBot。
+4. 如果确实要分别指定模型，再阅读[宿主修改说明](extras/README.md)，先检查版本、备份文件，然后应用修改并重建 MaiBot。
+5. 重建成功后，在 MaiBot 的高级模型任务页面分别填写四个插件任务；没填的任务继续使用默认回复模型。
+
+不熟悉 Docker 镜像、源码目录或文件挂载时，建议使用普通版。不要直接在一次性容器里修改文件，否则重建容器后改动会消失。
+
+## 经典禁言版 v3.1.0
+
+这是禁言功能拆出去之前的最后一个稳定版本。它既能生成群聊日报，也能让指定群里的机器人完全不说话。
+
+只有确实需要“总结和禁言必须放在同一个插件里”时才选它。它的总结能力比 v3.6.0 旧，而且禁言会同时挡住普通回复、@ 回复、命令回复和其他插件发往该群的消息。
+
+[下载经典禁言版 v3.1.0](https://github.com/artinsteinbrecher-lab/MaiBot-private-daily-analysis/releases/download/v3.1.0/khiqwq_daily_analysis-v3.1.0-legacy-silence.zip) ·
+[查看经典禁言版说明](docs/LEGACY_SILENCE.md)
+
+### 经典禁言版怎么安装
+
+1. 如果已经装了 v3.6.0，先备份并移走它；两个版本不能同时加载。
+2. 解压经典禁言版 ZIP，把插件文件夹放进 MaiBot 插件目录。
+3. 先配置来源群、管理员和日报接收账号，确认私聊 `/summary` 能正常工作。
+4. 最后再打开 `[silence]`，一次只测试一个群。禁言群必须同时属于日报来源群。
+5. 确认管理员私聊仍然可用后，再逐步增加其他禁言群。
+
+如果你想要最新总结效果，同时又要禁言，优先使用 v3.6.0 加独立的“QQ 群绝对静默守卫”，不要为了禁言放弃新版总结能力。
+
+## 其他说明
+
+- [全部文档入口](docs/README.md)
+- [模型怎么分配](docs/MODEL_ASSIGNMENT.md)
+- [遇到问题怎么办](SUPPORT.md)
+- [维护和发布说明](CONTRIBUTING.md)
+
+GitHub 自动生成的 Source code 压缩包是源码快照，不是这里整理好的插件安装包。
+
+## v3.6.0 能做什么
 
 - 管理员私聊执行 `/summary 群号 [今天|昨天]`，或 `/summary 全部 [今天|昨天]`。
 - 次日定时总结前一个完整自然日，默认于配置时区的 00:10 执行。
@@ -69,7 +96,7 @@
 
 插件不会生成活跃度、MBTI、娱乐化群友画像、金句排行或情绪指数；`/mysummary` 保留的是有消息证据支持的事实型个人画像。
 
-## 兼容范围
+## v3.6.0 可以装在哪里
 
 - MaiBot：`1.0.0`—`1.99.99`
 - `maibot_sdk`：`2.0.0`—`2.99.99`
@@ -79,12 +106,12 @@
 插件不直连 NapCat，也不保存模型 URL、API Key 或供应商配置。消息读取、模型调用、渲染和发送
 均通过 MaiBot 官方 `ctx.*` 能力完成。
 
-## 安装边界
+## v3.6.0 安装时别弄错
 
-- standard 按上面的五分钟流程安装即可，四个 LLM 流程统一跟随 MaiBot `replyer`，不修改 MaiBot 主程序。
-- multimodel 也必须先作为普通插件验证成功；只有需要分别分配模型时，才继续执行 `extras/README.md` 的宿主扩展流程。
-- 官方 SDK 目前没有让普通插件自行注册全局模型任务的接口，因此四任务路由不能靠复制插件目录自动完成。
-- 插件更新不会修改 MaiBot 的模型供应商、URL、API Key 或模型 ID。
+- 普通版只需要复制插件目录，不修改 MaiBot。
+- 增强版只有在分别指定模型时才需要修改 MaiBot；单纯复制增强版，不会自动出现四个模型任务。
+- 模型供应商、地址、API Key 和模型名称都在 MaiBot 里管理，不要填进插件配置。
+- 三种下载使用同一个插件 ID，一次只能安装一种。
 
 有效插件目录至少应包含：
 
@@ -251,7 +278,7 @@ split_chunk_on_failure = true
 
 不满足安全前置条件时只写插件日志，不读取群消息、不调用模型。
 
-## 独立绝对静默
+## v3.6.0 如何配合独立禁言插件
 
 日报从 v3.2 起已移除 `[silence]` 配置和发送前 Hook。要让指定群绝对静默，请使用独立的
 “QQ 群绝对静默守卫”，并在守卫的群名单中填写目标群号。这样：
