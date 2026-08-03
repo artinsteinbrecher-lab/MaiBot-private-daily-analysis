@@ -55,8 +55,14 @@ class ReleaseCopyTests(unittest.TestCase):
         guide = legacy_doc.read_text(encoding="utf-8")
         self.assertIn(download, readme)
         self.assertIn(download, guide)
+        self.assertIn("麦麦安静写书", readme)
+        self.assertIn("麦麦安静写书", guide)
         self.assertIn("不能同时", readme)
         self.assertIn("其他插件发往该群的消息", guide)
+        self.assertLess(
+            readme.index("麦麦安静写书"),
+            readme.index("维护者自用的新版本"),
+        )
 
     def test_manifest_version_must_be_semver(self):
         self.assertEqual(validate_version("3.6.0"), "3.6.0")
