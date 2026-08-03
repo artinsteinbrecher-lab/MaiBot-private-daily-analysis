@@ -30,6 +30,7 @@
 
 需要更细的日报，或者想让多个模型一起分工，可以看看 **麦麦最新改版插件 v3.6.0**。它不再内置群聊禁言。
 
+- [v3.6.0 完整介绍与安装](V3_6.md)
 - [普通包说明](../packaging/standard/README.md)
 - [多模型包说明](../packaging/multimodel/README.md)
 - [模型怎么分配](MODEL_ASSIGNMENT.md)

@@ -72,6 +72,7 @@
 
 如果更在意总结效果，或者想让多个模型分别整理、写作和检查日报，可以看看 **麦麦最新改版插件 v3.6.0**。它的总结更细，但不再自带群聊禁言。
 
+[查看 v3.6.0 完整介绍与安装](docs/V3_6.md) ·
 [查看 v3.6.0](https://github.com/artinsteinbrecher-lab/MaiBot-private-daily-analysis/releases/tag/v3.6.0) ·
 [普通包](https://github.com/artinsteinbrecher-lab/MaiBot-private-daily-analysis/releases/download/v3.6.0/khiqwq_daily_analysis-v3.6.0-standard.zip) ·
 [多模型包](https://github.com/artinsteinbrecher-lab/MaiBot-private-daily-analysis/releases/download/v3.6.0/khiqwq_daily_analysis-v3.6.0-multimodel.zip)

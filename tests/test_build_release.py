@@ -30,7 +30,12 @@ class ReleaseCopyTests(unittest.TestCase):
 
     def test_primary_document_navigation_links_exist(self):
         root = Path(__file__).resolve().parents[1]
-        for markdown in (root / "README.md", root / "docs" / "README.md"):
+        for markdown in (
+            root / "README.md",
+            root / "docs" / "README.md",
+            root / "docs" / "LEGACY_SILENCE.md",
+            root / "docs" / "V3_6.md",
+        ):
             if not markdown.exists():
                 continue
             text = markdown.read_text(encoding="utf-8")
@@ -66,6 +71,24 @@ class ReleaseCopyTests(unittest.TestCase):
         self.assertIn("麦麦群安静插件", readme)
         self.assertIn("麦麦最新改版插件 v3.6.0", readme)
         self.assertIn("/mysummary", readme)
+
+    def test_v36_complete_guide_keeps_both_install_paths(self):
+        root = Path(__file__).resolve().parents[1]
+        guide = (root / "docs" / "V3_6.md").read_text(encoding="utf-8")
+
+        self.assertIn("主要事件", guide)
+        self.assertIn("普通事件", guide)
+        self.assertIn("khiqwq_daily_analysis-v3.6.0-standard.zip", guide)
+        self.assertIn("khiqwq_daily_analysis-v3.6.0-multimodel.zip", guide)
+        self.assertIn("install_maibot_task_routing.py /path/to/MaiBot --check", guide)
+        self.assertIn("install_maibot_task_routing.py /path/to/MaiBot --apply", guide)
+        for task_name in (
+            "plugin_daily_extract",
+            "plugin_daily_compose",
+            "plugin_daily_verify",
+            "plugin_user_profile",
+        ):
+            self.assertIn(task_name, guide)
 
     def test_manifest_version_must_be_semver(self):
         self.assertEqual(validate_version("3.6.0"), "3.6.0")
