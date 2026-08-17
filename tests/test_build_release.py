@@ -14,6 +14,12 @@ class ReleaseCopyTests(unittest.TestCase):
         version = validate_version(manifest["version"])
         readme = (root / "README.md").read_text(encoding="utf-8")
         downloads = (root / "docs" / "DOWNLOADS.md").read_text(encoding="utf-8")
+        legacy_manifest = json.loads(
+            (root / "editions" / "legacy_silence" / "_manifest.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        legacy_version = validate_version(legacy_manifest["version"])
 
         self.assertIn(f"/releases/tag/v{version}", downloads)
         self.assertIn(f"khiqwq_daily_analysis-v{version}-", downloads)
@@ -28,6 +34,14 @@ class ReleaseCopyTests(unittest.TestCase):
                 )
                 self.assertIn(filename, variant_readme)
                 self.assertIn(f"/releases/tag/v{version}", variant_readme)
+
+        legacy_filename = (
+            f"khiqwq_daily_analysis-v{legacy_version}-legacy-silence.zip"
+        )
+        self.assertIn(
+            f"/releases/download/v{version}/{legacy_filename}",
+            downloads,
+        )
 
     def test_primary_document_navigation_links_exist(self):
         root = Path(__file__).resolve().parents[1]
@@ -58,8 +72,16 @@ class ReleaseCopyTests(unittest.TestCase):
         if not legacy_doc.exists():
             return
 
-        filename = "khiqwq_daily_analysis-v3.1.0-legacy-silence.zip"
-        download = f"/releases/download/v3.1.0/{filename}"
+        current_manifest = json.loads((root / "_manifest.json").read_text(encoding="utf-8"))
+        release_version = validate_version(current_manifest["version"])
+        legacy_manifest = json.loads(
+            (root / "editions" / "legacy_silence" / "_manifest.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        legacy_version = validate_version(legacy_manifest["version"])
+        filename = f"khiqwq_daily_analysis-v{legacy_version}-legacy-silence.zip"
+        download = f"/releases/download/v{release_version}/{filename}"
         readme = (root / "README.md").read_text(encoding="utf-8")
         guide = legacy_doc.read_text(encoding="utf-8")
         self.assertIn(download, readme)

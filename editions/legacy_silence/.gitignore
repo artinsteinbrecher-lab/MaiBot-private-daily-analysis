@@ -1,0 +1,32 @@
+# Python 缓存文件
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# 日志文件
+logs/
+*.log
+*.log.*
+
+# IDE 配置
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# 测试临时文件
+src/
+test_*.py.bak
+
+# 系统文件
+.DS_Store
+Thumbs.db
+
+# 用户配置文件（不提交到仓库）
+config.toml
+config.toml.backup.*
+config_back/
+
+# 生成的图片文件
+data_GeneratePicture/

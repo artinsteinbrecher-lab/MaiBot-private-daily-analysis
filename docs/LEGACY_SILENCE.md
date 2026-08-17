@@ -1,4 +1,4 @@
-# 麦麦安静写书 v3.1.0
+# 麦麦安静写书 v3.1.1
 
 ## 简单说
 
@@ -6,8 +6,8 @@
 
 麦麦可以继续接收你允许它读取的群消息，把一天里发生的事情整理好，再送到管理员私聊；同时，它也可以在你指定的群里安安静静，不发出任何消息。
 
-[下载“麦麦安静写书”](https://github.com/artinsteinbrecher-lab/MaiBot-private-daily-analysis/releases/download/v3.1.0/khiqwq_daily_analysis-v3.1.0-legacy-silence.zip) ·
-[打开下载页](https://github.com/artinsteinbrecher-lab/MaiBot-private-daily-analysis/releases/tag/v3.1.0)
+[下载“麦麦安静写书”](https://github.com/artinsteinbrecher-lab/MaiBot-private-daily-analysis/releases/download/v3.6.1/khiqwq_daily_analysis-v3.1.1-legacy-silence.zip) ·
+[打开三版本下载页](https://github.com/artinsteinbrecher-lab/MaiBot-private-daily-analysis/releases/tag/v3.6.1)
 
 ## 安装只要三步
 
@@ -66,12 +66,12 @@
 
 - 先留好备份，一次只加载一个版本。
 - 不同版本的设置不完全一样，不要用一份完整配置直接盖住另一份。
-- 从这个版本换到 v3.6.0 后，内置禁言不会跟着过去；如果还需要禁言，要另外使用独立的静默插件。
+- 从这个版本换到 v3.6.1 后，内置禁言不会跟着过去；如果还需要禁言，要另外使用独立的静默插件。
 
 ## 这份下载检查过什么
 
-- 重新比较后仍然选择 v3.1.0：更早的 1.2.1 虽然有娱乐内容，却没有群聊禁言，也不适合现在的 MaiBot；v3.1.0 同时保留了 WebUI、安静模式和个人趣味总结。
-- 安装包来自仓库的 v3.1.0 固定版本，没有混入后来的代码。
-- 这个历史版本自己的 18 项测试全部通过，其中包括 3 项安静模式检查。
+- v3.1.1 以 v3.1.0 为基础：更早的 1.2.1 虽然有娱乐内容，却没有群聊禁言，也不适合现在的 MaiBot；这个维护版同时保留了 WebUI、安静模式和个人趣味总结。
+- 本次只移植日报顺序锁、文字/图片发送间隔和发送回执兼容，不混入 v3.6.1 的新总结核心或多模型功能。
+- 这个维护版本自己的 21 项测试全部通过，其中包括安静模式、顺序发送和并发隔离检查。
 - 安装包里没有真实账号、密码、登录凭据、缓存或使用中的 `config.toml`。
-- ZIP SHA256：`b6586583d005a8c817609ee2b6d1fe93b33b2ff1f8d2625d657f229e216617e1`。
+- 下载后可以用同一 Release 里的 `SHA256SUMS.txt` 核对文件是否完整。

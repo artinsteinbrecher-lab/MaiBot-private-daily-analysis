@@ -1,0 +1,251 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+    <meta charset="utf-8">
+    <style>
+        * { box-sizing: border-box; }
+        body {
+            margin: 0;
+            padding: 34px;
+            color: #172033;
+            background: #eef2f7;
+            font-family: "Noto Sans CJK SC", "Noto Sans SC", "Microsoft YaHei",
+                         "WenQuanYi Micro Hei", sans-serif;
+            font-size: 22px;
+            line-height: 1.62;
+        }
+        .page {
+            width: 932px;
+            margin: 0 auto;
+            padding: 42px 46px;
+            background: #ffffff;
+            border: 1px solid #d9e0ea;
+            border-radius: 22px;
+            box-shadow: 0 10px 34px rgba(30, 46, 70, 0.10);
+        }
+        .header {
+            padding-bottom: 26px;
+            border-bottom: 4px solid #155e75;
+        }
+        .eyebrow {
+            color: #0e7490;
+            font-size: 18px;
+            font-weight: 700;
+            letter-spacing: 0.08em;
+        }
+        h1 {
+            margin: 8px 0 10px;
+            color: #0f172a;
+            font-size: 38px;
+            line-height: 1.25;
+        }
+        .meta {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px 18px;
+            color: #526071;
+            font-size: 18px;
+        }
+        .meta span {
+            padding: 5px 12px;
+            background: #f1f5f9;
+            border-radius: 999px;
+        }
+        .sampled {
+            margin-top: 14px;
+            padding: 10px 14px;
+            color: #92400e;
+            background: #fffbeb;
+            border-left: 5px solid #f59e0b;
+            border-radius: 8px;
+            font-size: 17px;
+        }
+        .overview {
+            margin: 28px 0 30px;
+            padding: 22px 24px;
+            background: #ecfeff;
+            border: 1px solid #a5f3fc;
+            border-radius: 16px;
+        }
+        .overview h2 {
+            margin: 0 0 10px;
+            color: #155e75;
+            font-size: 24px;
+        }
+        .overview p { margin: 0; }
+        .event {
+            position: relative;
+            margin-top: 26px;
+            padding: 24px 26px 24px 30px;
+            border: 1px solid #dbe4ee;
+            border-left: 8px solid #0e7490;
+            border-radius: 16px;
+            background: #fbfdff;
+            break-inside: avoid;
+        }
+        .event-header {
+            display: flex;
+            align-items: flex-start;
+            gap: 16px;
+            margin-bottom: 13px;
+        }
+        .time {
+            flex: 0 0 auto;
+            padding: 7px 12px;
+            color: #ffffff;
+            background: #0e7490;
+            border-radius: 10px;
+            font-family: "Patrick Hand", monospace;
+            font-size: 20px;
+            white-space: nowrap;
+        }
+        .event-title {
+            margin: 1px 0 0;
+            color: #0f172a;
+            font-size: 27px;
+            line-height: 1.35;
+        }
+        .summary {
+            margin: 0 0 16px;
+            color: #273449;
+        }
+        .block {
+            margin-top: 13px;
+            padding: 13px 16px;
+            border-radius: 10px;
+            font-size: 19px;
+        }
+        .outcomes { background: #ecfdf5; border-left: 5px solid #10b981; }
+        .pending { background: #fff7ed; border-left: 5px solid #f97316; }
+        .participants { background: #f8fafc; border-left: 5px solid #94a3b8; }
+        .block-title {
+            margin-right: 8px;
+            font-weight: 800;
+        }
+        ul {
+            margin: 8px 0 0 25px;
+            padding: 0;
+        }
+        li { margin: 4px 0; }
+        .anchors {
+            margin-top: 16px;
+            padding-top: 13px;
+            border-top: 1px dashed #b9c5d3;
+        }
+        .anchor {
+            margin-top: 9px;
+            padding: 10px 13px;
+            color: #334155;
+            background: #f8fafc;
+            border-radius: 9px;
+            font-size: 18px;
+        }
+        .anchor-time {
+            color: #0e7490;
+            font-weight: 800;
+        }
+        .links {
+            margin-top: 13px;
+            color: #1d4ed8;
+            font-size: 17px;
+            overflow-wrap: anywhere;
+        }
+        .links div { margin-top: 5px; }
+        .footer {
+            display: flex;
+            justify-content: space-between;
+            margin-top: 34px;
+            padding-top: 18px;
+            color: #64748b;
+            border-top: 1px solid #dbe4ee;
+            font-size: 16px;
+        }
+    </style>
+</head>
+<body>
+<main class="page">
+    <header class="header">
+        <div class="eyebrow">MAIBOT · 群聊事件日报</div>
+        <h1>{{ group_name }}</h1>
+        <div class="meta">
+            <span>群号 {{ group_id }}</span>
+            <span>{{ report_date }}</span>
+            <span>{{ period_text }}</span>
+            <span>{{ message_count }} 条消息</span>
+        </div>
+        {% if sampled %}
+        <div class="sampled">
+            高流量群：共 {{ message_count }} 条消息，本次按全天时段均衡分析
+            {{ analyzed_message_count }} 条。时间线覆盖全天，但细节可能有抽样。
+        </div>
+        {% endif %}
+    </header>
+
+    {% if overview %}
+    <section class="overview">
+        <h2>一天发生了什么</h2>
+        <p>{{ overview }}</p>
+    </section>
+    {% endif %}
+
+    {% for event in events %}
+    <article class="event">
+        <div class="event-header">
+            <div class="time">{{ event.start_time }}—{{ event.end_time }}</div>
+            <h2 class="event-title">{{ event_offset + loop.index }}. {{ event.title }}</h2>
+        </div>
+        <p class="summary">{{ event.summary }}</p>
+
+        {% if event.outcomes %}
+        <div class="block outcomes">
+            <span class="block-title">已确定</span>
+            <ul>
+                {% for item in event.outcomes %}<li>{{ item }}</li>{% endfor %}
+            </ul>
+        </div>
+        {% endif %}
+
+        {% if event.pending %}
+        <div class="block pending">
+            <span class="block-title">待确认</span>
+            <ul>
+                {% for item in event.pending %}<li>{{ item }}</li>{% endfor %}
+            </ul>
+        </div>
+        {% endif %}
+
+        {% if event.participants %}
+        <div class="block participants">
+            <span class="block-title">相关成员</span>
+            {{ event.participants | join("、") }}
+        </div>
+        {% endif %}
+
+        {% if event.anchors %}
+        <div class="anchors">
+            <strong>回查锚点</strong>
+            {% for anchor in event.anchors %}
+            <div class="anchor">
+                <span class="anchor-time">{{ anchor.time }}</span>
+                <strong>{{ anchor.speaker }}</strong>：{{ anchor.quote }}
+            </div>
+            {% endfor %}
+        </div>
+        {% endif %}
+
+        {% if event.links %}
+        <div class="links">
+            <strong>相关链接</strong>
+            {% for link in event.links %}<div>{{ link }}</div>{% endfor %}
+        </div>
+        {% endif %}
+    </article>
+    {% endfor %}
+
+    <footer class="footer">
+        <span>仅基于所选时间范围内的群聊记录生成</span>
+        <span>第 {{ page_index }} / {{ page_count }} 页</span>
+    </footer>
+</main>
+</body>
+</html>

@@ -32,13 +32,13 @@ from .event_digest import (
 # LLM 各任务的输出 token 上限。
 # 通过 maibot_sdk 的 ``rpc_timeout_ms`` 参数把插件配置的等待时间传递到宿主，避免
 # 高质量模型仍被 cap.call 的默认 30 秒 RPC 上限提前切断；输出长度仍保持保守。
-_SUMMARY_MAX_TOKENS = 1200
-_JSON_MAX_TOKENS = 2500
-_EVENT_JSON_MAX_TOKENS = 3200
-
-_EVENT_CHUNK_MESSAGES = 120
-_EVENT_CHUNK_CHARACTERS = 8000
-_TOPIC_MAX_CANDIDATES_PER_CHUNK = 24
+# Keep the first extraction pass deliberately compact.  DSV4F exposes its
+# reasoning separately, but the task-level output budget is shared with the
+# final JSON.  Smaller chunks leave enough room for a complete structured
+# response and make fallback/retry decisions deterministic.
+_EVENT_CHUNK_MESSAGES = 80
+_EVENT_CHUNK_CHARACTERS = 6000
+_TOPIC_MAX_CANDIDATES_PER_CHUNK = 12
 _MAJOR_REFINE_BATCH_SIZE = 4
 _EVENT_CANDIDATE_HARD_LIMIT = 1000
 
@@ -110,21 +110,26 @@ class AnalysisService:
         prompt: str,
         *,
         request_type: str,
-        max_tokens: int = _JSON_MAX_TOKENS,
+        max_tokens: Optional[int] = None,
         temperature: float = 0.7,
         model_task: str = "",
     ) -> Optional[str]:
         """调用宿主 LLM 能力，成功返回文本，失败返回 None"""
         try:
             async with self._llm_semaphore:
+                generate_kwargs = {
+                    "model": model_task or self.model,
+                    "temperature": temperature,
+                    "rpc_timeout_ms": self.call_timeout_s * 1000,
+                }
+                # The four plugin-specific MaiBot tasks own their output limits.
+                # Do not pass a plugin-wide cap here: an explicit value would
+                # override the task's configured max_tokens and truncate long
+                # extraction JSON before the parser can see it.
+                if max_tokens is not None:
+                    generate_kwargs["max_tokens"] = max(1, int(max_tokens))
                 result = await asyncio.wait_for(
-                    self.ctx.llm.generate(
-                        prompt,
-                        model=model_task or self.model,
-                        temperature=temperature,
-                        max_tokens=max_tokens,
-                        rpc_timeout_ms=self.call_timeout_s * 1000,
-                    ),
+                    self.ctx.llm.generate(prompt, **generate_kwargs),
                     timeout=self.call_timeout_s + _RPC_TIMEOUT_GRACE_S,
                 )
         except asyncio.TimeoutError:
@@ -686,7 +691,6 @@ class AnalysisService:
         result = await self._llm(
             prompt,
             request_type="plugin.daily_event.extract",
-            max_tokens=_EVENT_JSON_MAX_TOKENS,
             temperature=0.2,
             model_task=self.topic_model,
         )
@@ -884,7 +888,6 @@ class AnalysisService:
         result = await self._llm(
             prompt,
             request_type="plugin.daily_event.refine",
-            max_tokens=_EVENT_JSON_MAX_TOKENS,
             temperature=0.2,
             model_task=self.refine_model,
         )
@@ -1026,7 +1029,6 @@ class AnalysisService:
         result = await self._llm(
             prompt,
             request_type="plugin.daily_event.verify",
-            max_tokens=_EVENT_JSON_MAX_TOKENS,
             temperature=0.0,
             model_task=self.verify_model,
         )
@@ -1292,8 +1294,8 @@ class AnalysisService:
                 },
             }
 
-        nested_outcomes = await asyncio.gather(
-            *(
+        chunk_tasks = [
+            asyncio.create_task(
                 self._extract_event_chunk_resilient(
                     chunk,
                     max_anchors=max_anchors,
@@ -1304,9 +1306,37 @@ class AnalysisService:
                     retry_count=retry_count,
                     split_on_timeout=split_on_timeout,
                 )
-                for index, chunk in enumerate(chunks, start=1)
             )
-        )
+            for index, chunk in enumerate(chunks, start=1)
+        ]
+        cancelled = False
+        try:
+            nested_outcomes = await asyncio.gather(*chunk_tasks)
+        except asyncio.CancelledError:
+            # A group-level timeout must not erase chunks that already finished.
+            # Stop pending calls, keep their deterministic time ranges, and let
+            # the caller deliver a clearly marked partial report.
+            cancelled = True
+            for task in chunk_tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*chunk_tasks, return_exceptions=True)
+            nested_outcomes = []
+            for index, (task, chunk) in enumerate(zip(chunk_tasks, chunks), start=1):
+                if task.done() and not task.cancelled() and task.exception() is None:
+                    nested_outcomes.append(task.result())
+                else:
+                    nested_outcomes.append(
+                        [
+                            {
+                                "success": False,
+                                "report": {"overview": "", "events": []},
+                                "retried": False,
+                                "from_split": False,
+                                **self._event_range(chunk),
+                            }
+                        ]
+                    )
         outcomes = [item for group in nested_outcomes for item in group]
         successful = [item for item in outcomes if item.get("success")]
         failed = [item for item in outcomes if not item.get("success")]
@@ -1332,7 +1362,7 @@ class AnalysisService:
             max_anchors=max_anchors,
             include_links=include_links,
         )
-        if refine_major_events and merged.get("events"):
+        if not cancelled and refine_major_events and merged.get("events"):
             merged = await self._refine_major_events(
                 merged,
                 selected,
@@ -1347,7 +1377,15 @@ class AnalysisService:
                 "refined": 0,
                 "fallback": len(major),
             }
-        merged = await self._verify_major_events(merged, selected)
+        if not cancelled:
+            merged = await self._verify_major_events(merged, selected)
+        else:
+            major, _ = partition_events(merged.get("events") or [])
+            merged["verification"] = {
+                "requested": len(major),
+                "verified": 0,
+                "fallback": len(major),
+            }
         analyzed_messages = sum(
             int(item.get("message_count") or 0) for item in successful
         )
@@ -1365,7 +1403,7 @@ class AnalysisService:
             for item in failed
         ]
         merged["sampled"] = sampled
-        merged["partial"] = bool(failed)
+        merged["partial"] = bool(failed) or cancelled
         merged["analyzed_message_count"] = analyzed_messages
         merged["coverage"] = {
             "mode": coverage_mode,

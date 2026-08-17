@@ -1,6 +1,6 @@
 [plugin]
 enabled = false
-config_version = "3.6.0"
+config_version = "3.6.1"
 
 [summary]
 coverage_mode = "完整覆盖"
@@ -43,7 +43,9 @@ admin_users = ["111111111"]
 inject_memory = false
 llm_timeout_seconds = 180
 render_timeout_seconds = 25
-group_timeout_seconds = 900
+message_interval_seconds = 1.0
+image_settle_seconds = 2.0
+group_timeout_seconds = 1800
 event_chunk_messages = 120
 event_chunk_characters = 8000
 event_retry_count = 2

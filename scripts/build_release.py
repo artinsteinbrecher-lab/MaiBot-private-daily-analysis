@@ -12,16 +12,22 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 DIST = ROOT / "dist"
+LEGACY_SOURCE = ROOT / "editions" / "legacy_silence"
 COMMON_FILES = (
     "plugin.py",
     "_manifest.json",
     "CHANGELOG.md",
     "LICENSE",
     "SECURITY.md",
+    "SUPPORT.md",
+    "CONTRIBUTING.md",
+    "CODE_OF_CONDUCT.md",
 )
-COMMON_DIRS = ("core", "templates", "fonts", "tests", "scripts")
+COMMON_DIRS = ("core", "templates", "fonts", "tests", "scripts", "docs")
 TEXT_SUFFIXES = {".py", ".md", ".toml", ".json", ".html", ".txt", ".patch"}
-RELEASE_IGNORE = shutil.ignore_patterns("__pycache__", "*.pyc", "*.pyo")
+RELEASE_IGNORE = shutil.ignore_patterns(
+    "__pycache__", "*.pyc", "*.pyo", "test_build_release.py"
+)
 SECRET_RE = re.compile(
     r"(?i)(api[_-]?key|access[_-]?token|secret[_-]?key|password|passwd)"
     r"\s*[:=]\s*[\"']?[A-Za-z0-9_./+\-=]{12,}"
@@ -73,9 +79,25 @@ def build_variant(name: str) -> Path:
     overlay = ROOT / "packaging" / name
     copy_entry(overlay / "README.md", package / "README.md")
     copy_entry(overlay / "config.example.toml", package / "config.example.toml")
+    # The source README lives under packaging/<variant>/, where ../../docs is
+    # correct.  In the standalone ZIP, docs/ is copied into the package root;
+    # rewrite only this release-relative link so the extracted package remains
+    # self-contained without making the source documentation confusing.
+    readme = package / "README.md"
+    readme.write_text(
+        readme.read_text(encoding="utf-8").replace("../../docs/", "docs/"),
+        encoding="utf-8",
+        newline="\n",
+    )
     if name == "multimodel":
         copy_entry(ROOT / "docs" / "MODEL_ASSIGNMENT.md", package / "MODEL_ASSIGNMENT.md")
         copy_entry(ROOT / "extras", package / "extras")
+    return package
+
+
+def build_legacy_variant() -> Path:
+    package = DIST / "khiqwq_daily_analysis_legacy_silence"
+    copy_entry(LEGACY_SOURCE, package)
     return package
 
 
@@ -126,7 +148,7 @@ def write_core_comparison(rows: list[tuple[str, str]]) -> Path:
         "multimodel=khiqwq_daily_analysis_multimodel",
         "result=IDENTICAL",
         "algorithm=SHA256",
-        "scope=plugin.py,_manifest.json,CHANGELOG.md,LICENSE,SECURITY.md,core/,templates/,fonts/,tests/,scripts/",
+        "scope=plugin.py,_manifest.json,CHANGELOG.md,LICENSE,SECURITY.md,SUPPORT.md,CONTRIBUTING.md,CODE_OF_CONDUCT.md,core/,templates/,fonts/,tests/,scripts/,docs/",
         "note=README.md and config.example.toml intentionally differ; multimodel-only MODEL_ASSIGNMENT.md and extras/ are excluded.",
         "",
         "PATH|SHA256",
@@ -136,13 +158,13 @@ def write_core_comparison(rows: list[tuple[str, str]]) -> Path:
     return output
 
 
-def write_manifest(packages: tuple[Path, Path]) -> Path:
+def write_manifest(packages: tuple[Path, ...]) -> Path:
     output = DIST / "FILE_MANIFEST.txt"
     lines = [
         "FILE_MANIFEST",
         f"generated_date={date.today().isoformat()}",
         "algorithm=SHA256",
-        "scope=khiqwq_daily_analysis_standard/,khiqwq_daily_analysis_multimodel/",
+        "scope=khiqwq_daily_analysis_legacy_silence/,khiqwq_daily_analysis_standard/,khiqwq_daily_analysis_multimodel/",
         "",
         "PATH|BYTES|SHA256",
     ]
@@ -181,16 +203,26 @@ def validate_version(value: object) -> str:
 def main() -> int:
     manifest = json.loads((ROOT / "_manifest.json").read_text(encoding="utf-8"))
     version = validate_version(manifest.get("version"))
+    legacy_manifest = json.loads(
+        (LEGACY_SOURCE / "_manifest.json").read_text(encoding="utf-8")
+    )
+    legacy_version = validate_version(legacy_manifest.get("version"))
     reset_dist()
+    legacy = build_legacy_variant()
     standard = build_variant("standard")
     multimodel = build_variant("multimodel")
+    validate_package(legacy, multimodel=False)
     validate_package(standard, multimodel=False)
     validate_package(multimodel, multimodel=True)
     comparison = write_core_comparison(compare_common(standard, multimodel))
-    file_manifest = write_manifest((standard, multimodel))
+    file_manifest = write_manifest((legacy, standard, multimodel))
+    legacy_zip = zip_package(legacy, legacy_version, "legacy-silence")
     standard_zip = zip_package(standard, version, "standard")
     multimodel_zip = zip_package(multimodel, version, "multimodel")
-    checksums = write_checksums([comparison, file_manifest, standard_zip, multimodel_zip])
+    checksums = write_checksums(
+        [comparison, file_manifest, legacy_zip, standard_zip, multimodel_zip]
+    )
+    print(f"built {legacy_zip.name}")
     print(f"built {standard_zip.name}")
     print(f"built {multimodel_zip.name}")
     print(f"wrote {checksums.name}")

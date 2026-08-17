@@ -113,7 +113,11 @@ class PluginRoutingTests(unittest.TestCase):
                 target_chats=groups or [],
             ),
             command_permission=SimpleNamespace(admin_users=admins or []),
-            advanced=SimpleNamespace(model_task="legacy-task"),
+            advanced=SimpleNamespace(
+                model_task="legacy-task",
+                message_interval_seconds=0,
+                image_settle_seconds=0,
+            ),
         )
         return plugin
 
@@ -447,6 +451,8 @@ class PluginRoutingTests(unittest.TestCase):
         plugin.config.advanced = SimpleNamespace(
             group_timeout_seconds=60,
             inject_memory=False,
+            message_interval_seconds=0,
+            image_settle_seconds=0,
         )
 
         async def analyze(meta, *args):
@@ -525,6 +531,8 @@ class PluginRoutingTests(unittest.TestCase):
         plugin.config.advanced = SimpleNamespace(
             group_timeout_seconds=60,
             inject_memory=False,
+            message_interval_seconds=0,
+            image_settle_seconds=0,
         )
 
         async def analyze(meta, *args):
@@ -604,6 +612,101 @@ class PluginRoutingTests(unittest.TestCase):
         self.assertIn("处理接口故障", sent_text)
         self.assertIn("部分完成 1 个", sent_text)
         self.assertIn("失败 0 个", sent_text)
+
+    def test_report_messages_use_configured_pacing(self):
+        plugin = self._plugin()
+        plugin.config.advanced.message_interval_seconds = 1.25
+        sleeps = []
+
+        async def fake_sleep(seconds):
+            sleeps.append(seconds)
+
+        original_sleep = plugin_module.asyncio.sleep
+        plugin_module.asyncio.sleep = fake_sleep
+        try:
+            result = asyncio.run(
+                DailyAnalysisPlugin._send_report_text(
+                    plugin,
+                    "第 1/2 页",
+                    "private-stream",
+                )
+            )
+        finally:
+            plugin_module.asyncio.sleep = original_sleep
+
+        self.assertTrue(result)
+        self.assertEqual(sleeps, [1.25])
+        self.assertEqual(
+            plugin.ctx.send.calls,
+            [("text", "private-stream", "第 1/2 页")],
+        )
+
+    def test_same_destination_reports_are_serialized_as_whole_jobs(self):
+        plugin = self._plugin()
+        timeline = []
+        active = 0
+        max_active = 0
+
+        async def locked_delivery(destination_stream_id, groups, **kwargs):
+            nonlocal active, max_active
+            label = kwargs["request_label"]
+            active += 1
+            max_active = max(max_active, active)
+            timeline.append(("start", label))
+            await asyncio.sleep(0.01)
+            timeline.append(("end", label))
+            active -= 1
+            return []
+
+        plugin._deliver_event_reports_locked = locked_delivery
+
+        async def run_two():
+            common = {
+                "start_ts": 0,
+                "end_ts": 1,
+                "report_date": datetime(2026, 8, 16),
+                "period_text": "测试",
+            }
+            first = asyncio.create_task(
+                DailyAnalysisPlugin._deliver_event_reports(
+                    plugin,
+                    "private-stream",
+                    [],
+                    request_label="日报 A",
+                    **common,
+                )
+            )
+            await asyncio.sleep(0)
+            second = asyncio.create_task(
+                DailyAnalysisPlugin._deliver_event_reports(
+                    plugin,
+                    "private-stream",
+                    [],
+                    request_label="日报 B",
+                    **common,
+                )
+            )
+            await asyncio.gather(first, second)
+
+        asyncio.run(run_two())
+        self.assertEqual(max_active, 1)
+        self.assertEqual(
+            timeline,
+            [
+                ("start", "日报 A"),
+                ("end", "日报 A"),
+                ("start", "日报 B"),
+                ("end", "日报 B"),
+            ],
+        )
+
+    def test_send_result_compatibility_handles_nested_sdk_payloads(self):
+        self.assertTrue(DailyAnalysisPlugin._send_succeeded(True))
+        self.assertTrue(
+            DailyAnalysisPlugin._send_succeeded({"success": {"success": True}})
+        )
+        self.assertFalse(DailyAnalysisPlugin._send_succeeded({"success": False}))
+        self.assertFalse(DailyAnalysisPlugin._send_succeeded(None))
 
 
 if __name__ == "__main__":

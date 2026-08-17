@@ -10,10 +10,10 @@ index d7d3a35..32bdb2d 100644
 --- a/src/config/default_model_config.py
 +++ b/src/config/default_model_config.py
 @@ -62,0 +63,4 @@ DEFAULT_TASK_CONFIG_TEMPLATES: dict[str, dict[str, Any]] = {
-+    "plugin_daily_extract": {"model_list": [], "max_tokens": 3200, "temperature": 0.1, "hard_timeout": 240.0},
++    "plugin_daily_extract": {"model_list": [], "max_tokens": 8192, "temperature": 0.1, "hard_timeout": 360.0},
 +    "plugin_daily_compose": {"model_list": [], "max_tokens": 3200, "temperature": 0.1, "hard_timeout": 240.0},
 +    "plugin_daily_verify": {"model_list": [], "max_tokens": 2500, "temperature": 0.0, "hard_timeout": 240.0},
-+    "plugin_user_profile": {"model_list": [], "max_tokens": 2500, "temperature": 0.2, "hard_timeout": 240.0},
++    "plugin_user_profile": {"model_list": [], "max_tokens": 6000, "temperature": 0.2, "hard_timeout": 300.0},
 diff --git a/src/config/model_configs.py b/src/config/model_configs.py
 index 5bda82e..30615c9 100644
 --- a/src/config/model_configs.py
