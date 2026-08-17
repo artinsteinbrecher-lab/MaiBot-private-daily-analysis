@@ -70,10 +70,10 @@ MODEL_CONFIG_FIELD_BLOCK = '''    plugin_daily_extract: TaskConfig = Field(
     """插件专用：事实型个人画像；留空时自动继用 replyer 模型"""
 '''
 
-DEFAULT_TASK_BLOCK = '''    "plugin_daily_extract": {"model_list": [], "max_tokens": 3200, "temperature": 0.1, "hard_timeout": 240.0},
+DEFAULT_TASK_BLOCK = '''    "plugin_daily_extract": {"model_list": [], "max_tokens": 8192, "temperature": 0.1, "hard_timeout": 360.0},
     "plugin_daily_compose": {"model_list": [], "max_tokens": 3200, "temperature": 0.1, "hard_timeout": 240.0},
     "plugin_daily_verify": {"model_list": [], "max_tokens": 2500, "temperature": 0.0, "hard_timeout": 240.0},
-    "plugin_user_profile": {"model_list": [], "max_tokens": 2500, "temperature": 0.2, "hard_timeout": 240.0},
+    "plugin_user_profile": {"model_list": [], "max_tokens": 6000, "temperature": 0.2, "hard_timeout": 300.0},
 '''
 
 FALLBACK_TASK_BLOCK = '''    "plugin_daily_extract": "replyer",

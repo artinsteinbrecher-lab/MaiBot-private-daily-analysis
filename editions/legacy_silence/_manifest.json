@@ -1,10 +1,10 @@
 {
   "manifest_version": 2,
   "id": "khiqwq.daily_analysis",
-  "version": "3.6.1",
+  "version": "3.1.1",
   "plugin_type": "tool",
   "name": "私聊群事件日报",
-  "description": "按白名单读取 QQ 群聊天记录，生成带证据绑定、独立复核和回查锚点的事实型日报，并仅发送给指定管理员私聊。保留事实型个人画像，不包含娱乐评级。",
+  "description": "按白名单读取 QQ 群聊天记录，生成带时间戳和回查锚点的事实型事件日报，并仅发送给指定管理员私聊。支持手动总结单群或全部群、次日定时日报，以及可选的指定来源群绝对静默出站拦截。",
   "author": {
     "name": "artinsteinbrecher-lab",
     "url": "https://github.com/artinsteinbrecher-lab"
@@ -17,7 +17,7 @@
     "issues": "https://github.com/artinsteinbrecher-lab/MaiBot-private-daily-analysis/issues"
   },
   "host_application": {
-    "min_version": "1.1.0",
+    "min_version": "1.0.0",
     "max_version": "1.99.99"
   },
   "sdk": {

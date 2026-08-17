@@ -1,6 +1,6 @@
 [plugin]
 enabled = false
-config_version = "3.6.0"
+config_version = "3.6.1"
 
 [summary]
 coverage_mode = "完整覆盖"
@@ -44,8 +44,12 @@ admin_users = ["111111111"]
 inject_memory = false
 llm_timeout_seconds = 180
 render_timeout_seconds = 25
-group_timeout_seconds = 900
-event_chunk_messages = 120
-event_chunk_characters = 8000
+# 连续日报消息的发送间隔；用于避免 QQ/NapCat 在同一秒内显示乱序。
+message_interval_seconds = 1.0
+# 每张日报图片发送后的稳定等待时间。
+image_settle_seconds = 2.0
+group_timeout_seconds = 1800
+event_chunk_messages = 80
+event_chunk_characters = 6000
 event_retry_count = 2
 split_chunk_on_failure = true

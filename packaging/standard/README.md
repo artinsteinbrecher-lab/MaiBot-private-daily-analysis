@@ -1,9 +1,9 @@
-# 麦麦认真写书 · v3.6.0 标准版
+# 麦麦认真写书 · v3.6.1 标准版
 
 维护仓库：[artinsteinbrecher-lab/MaiBot-private-daily-analysis](https://github.com/artinsteinbrecher-lab/MaiBot-private-daily-analysis)
 
-当前安装包：`khiqwq_daily_analysis-v3.6.0-standard.zip` ·
-[查看正式 Release](https://github.com/artinsteinbrecher-lab/MaiBot-private-daily-analysis/releases/tag/v3.6.0) ·
+当前安装包：`khiqwq_daily_analysis-v3.6.1-standard.zip` ·
+[预留 Release 地址](https://github.com/artinsteinbrecher-lab/MaiBot-private-daily-analysis/releases/tag/v3.6.1) ·
 [返回版本与下载](../../docs/DOWNLOADS.md)
 
 这个版本专心把群聊里的事情写清楚。它会同时保留主要事件和普通事件，把日报只发给管理员私聊，并尽量核对时间、参与者、链接和引用。
@@ -30,8 +30,8 @@
 
 ## 可以装在哪里
 
-- MaiBot：`1.0.0`—`1.99.99`
-- `maibot_sdk`：`2.0.0`—`2.99.99`
+- MaiBot：`1.1.3`—`1.99.99`（首发按已验证版本起步）
+- `maibot_sdk`：`2.5.3`—`2.99.99`
 - 主要环境：Ubuntu + Docker
 - 已验证：MaiCore 1.1.0、Python 3.13、NapCat 正向 WebSocket
 
@@ -80,7 +80,7 @@ fonts/
 ```toml
 [plugin]
 enabled = true
-config_version = "3.6.0"
+config_version = "3.6.1"
 
 [summary]
 coverage_mode = "完整覆盖"
@@ -117,7 +117,7 @@ admin_users = ["111111111"]
 inject_memory = false
 llm_timeout_seconds = 180
 render_timeout_seconds = 25
-group_timeout_seconds = 900
+group_timeout_seconds = 1800
 event_chunk_messages = 120
 event_chunk_characters = 8000
 event_retry_count = 2
@@ -132,7 +132,7 @@ split_chunk_on_failure = true
 - 多个管理员共用来源群白名单，但每次手动请求的进度与结果只发给发起账号。
 - 插件设置中不再出现模型任务、供应商或模型 ID 字段。
 - 四个内部流程固定跟随 `replyer`，下载插件本身即可运行。
-- 如需四任务独立模型分配，请改用“麦麦一起写书”（v3.6.0 多模型版）。
+- 如需四任务独立模型分配，请改用“麦麦一起写书”（v3.6.1 多模型版）。
 - 没加入的群没有可用群聊流，会被标为空或不可用，不会阻塞其他群。
 
 ### 模型来源

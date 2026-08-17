@@ -3,6 +3,7 @@
 不用把所有文件都看一遍，找到自己需要的那一小段就好。
 
 [先看三个版本与下载](DOWNLOADS.md)
+[查看兼容性与版本边界](COMPATIBILITY.md)
 
 ## 麦麦安静写书
 
@@ -10,7 +11,7 @@
 
 - [回到温柔一点的安装首页](../README.md)
 - [查看完整安装和注意事项](LEGACY_SILENCE.md)
-- [打开 v3.1.0 下载页](https://github.com/artinsteinbrecher-lab/MaiBot-private-daily-analysis/releases/tag/v3.1.0)
+- [打开三版本 v3.6.1 下载页](https://github.com/artinsteinbrecher-lab/MaiBot-private-daily-analysis/releases/tag/v3.6.1)
 
 ## 如果遇到问题
 
@@ -26,13 +27,13 @@
 
 ## 麦麦认真写书
 
-这是 v3.6.0 标准版，提供主要事件与普通事件，直接跟随 MaiBot 默认模型。
+这是 v3.6.1 标准版，提供主要事件与普通事件，直接跟随 MaiBot 默认模型。
 
 - [版本介绍与安装](../packaging/standard/README.md)
 
 ## 麦麦一起写书
 
-这是 v3.6.0 多模型版，总结核心与标准版相同，完成第二阶段安装后可以让多个模型分工。
+这是 v3.6.1 多模型版，总结核心与标准版相同，完成第二阶段安装后可以让多个模型分工。
 
 - [版本介绍与安装](../packaging/multimodel/README.md)
 - [模型怎么分配](MODEL_ASSIGNMENT.md)

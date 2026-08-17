@@ -1,9 +1,9 @@
-# 麦麦一起写书 · v3.6.0 多模型版
+# 麦麦一起写书 · v3.6.1 多模型版
 
 维护仓库：[artinsteinbrecher-lab/MaiBot-private-daily-analysis](https://github.com/artinsteinbrecher-lab/MaiBot-private-daily-analysis)
 
-当前安装包：`khiqwq_daily_analysis-v3.6.0-multimodel.zip` ·
-[查看正式 Release](https://github.com/artinsteinbrecher-lab/MaiBot-private-daily-analysis/releases/tag/v3.6.0) ·
+当前安装包：`khiqwq_daily_analysis-v3.6.1-multimodel.zip` ·
+[预留 Release 地址](https://github.com/artinsteinbrecher-lab/MaiBot-private-daily-analysis/releases/tag/v3.6.1) ·
 [返回版本与下载](../../docs/DOWNLOADS.md)
 
 这个版本让多个模型一起完成日报：可以分别负责读取事实、整理成稿、复查内容和生成人物小结。
@@ -30,8 +30,8 @@
 
 ## 可以装在哪里
 
-- MaiBot：`1.0.0`—`1.99.99`
-- `maibot_sdk`：`2.0.0`—`2.99.99`
+- MaiBot：`1.1.3`—`1.99.99`（首发按已验证版本起步）
+- `maibot_sdk`：`2.5.3`—`2.99.99`
 - 主要环境：Ubuntu + Docker
 - 已验证：MaiCore 1.1.0、Python 3.13、NapCat 正向 WebSocket
 
@@ -82,7 +82,7 @@ extras/  # 版本检测、备份、应用、回滚脚本及人工参考补丁
 ```toml
 [plugin]
 enabled = true
-config_version = "3.6.0"
+config_version = "3.6.1"
 
 [summary]
 coverage_mode = "完整覆盖"
@@ -119,7 +119,7 @@ admin_users = ["111111111"]
 inject_memory = false
 llm_timeout_seconds = 180
 render_timeout_seconds = 25
-group_timeout_seconds = 900
+group_timeout_seconds = 1800
 event_chunk_messages = 120
 event_chunk_characters = 8000
 event_retry_count = 2
