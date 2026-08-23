@@ -266,6 +266,15 @@ class AdvancedSection(PluginConfigBase):
         description="分段重试仍失败时，将该时段一分为二后再次分析",
         json_schema_extra={"label": "失败后拆分重试"},
     )
+    refine_batch_size: int = Field(
+        default=4,
+        description="每次精炼调用包含的主要事件数量（1-8）。推理型模型的思考和最终 JSON "
+        "共用输出预算，日报出现精炼回退或内容被截断时建议调小到 1-2",
+        json_schema_extra={
+            "label": "每批精炼事件数",
+            "hint": "推荐 4；模型输出经常被截断时改为 1",
+        },
+    )
 
 
 class DailyAnalysisConfig(PluginConfigBase):
@@ -927,6 +936,10 @@ class DailyAnalysisPlugin(MaiBotPlugin):
             split_on_timeout=bool(advanced_cfg.split_chunk_on_failure),
             refine_major_events=bool(
                 getattr(summary_cfg, "refine_major_events", True)
+            ),
+            refine_batch_size=max(
+                1,
+                min(8, int(getattr(advanced_cfg, "refine_batch_size", 4) or 4)),
             ),
         )
         result["report"] = report

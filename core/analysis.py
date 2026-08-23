@@ -828,8 +828,14 @@ class AnalysisService:
         max_anchors: int,
         include_links: bool,
         detail_level: str,
+        allow_single_retry: bool = True,
     ) -> Tuple[List[Dict[str, Any]], int]:
-        """批量精炼主要事件；失败事件原样返回，不影响话题索引完整性。"""
+        """批量精炼主要事件；失败事件原样返回，不影响话题索引完整性。
+
+        多事件批量输出对推理型模型（输出预算与思考 token 共享）容易触发
+        MAX_TOKENS 截断：JSON 写到中途被切断，整批解析失败或后半批候选缺失。
+        因此批量结果不完整时，未精炼的候选会以单事件方式各重试一次——单事件
+        输出最短，是同一预算下最可能完整返回的形态。"""
 
         source_by_id: Dict[str, List[dict]] = {}
         candidate_blocks: List[str] = []
@@ -853,7 +859,7 @@ class AnalysisService:
                 f"初步概括：{event.get('summary')}\n"
                 f"对应原消息：\n{source_text}"
             )
-        prompt = f"""你是一名严谨的群聊事件编辑。下面是最多 {_MAJOR_REFINE_BATCH_SIZE} 个
+        prompt = f"""你是一名严谨的群聊事件编辑。下面是 {len(batch)} 个
 主要事件候选及其对应原消息。请逐个补充详细经过、明确结论、待确认事项、必要参与者、
 重要链接和回查原话。{self._event_detail_instruction(detail_level)}
 
@@ -902,12 +908,14 @@ class AnalysisService:
         }
 
         refined: List[Dict[str, Any]] = []
+        refined_flags: List[bool] = []
         success_count = 0
         for index, candidate in enumerate(batch, start=1):
             candidate_id = f"E{index}"
             raw = raw_by_id.get(candidate_id)
             if not raw:
                 refined.append(candidate)
+                refined_flags.append(False)
                 continue
             grounded = self._ground_event_report(
                 {"overview": "", "events": [{**raw, "importance": "major"}]},
@@ -919,6 +927,7 @@ class AnalysisService:
             )
             if not grounded.get("events"):
                 refined.append(candidate)
+                refined_flags.append(False)
                 continue
             event = grounded["events"][0]
             # The candidate ID is authoritative; a refinement model must not
@@ -934,7 +943,24 @@ class AnalysisService:
             )
             event["refined"] = True
             refined.append(event)
+            refined_flags.append(True)
             success_count += 1
+
+        if allow_single_retry and len(batch) > 1 and success_count < len(batch):
+            for index, succeeded in enumerate(refined_flags):
+                if succeeded:
+                    continue
+                single_events, single_success = await self._refine_major_batch(
+                    [batch[index]],
+                    messages,
+                    max_anchors=max_anchors,
+                    include_links=include_links,
+                    detail_level=detail_level,
+                    allow_single_retry=False,
+                )
+                if single_success:
+                    refined[index] = single_events[0]
+                    success_count += 1
         return refined, success_count
 
     async def _refine_major_events(
@@ -945,6 +971,7 @@ class AnalysisService:
         max_anchors: int,
         include_links: bool,
         detail_level: str,
+        refine_batch_size: int = _MAJOR_REFINE_BATCH_SIZE,
     ) -> Dict[str, Any]:
         major, minor = partition_events(report.get("events") or [])
         if not major:
@@ -954,9 +981,12 @@ class AnalysisService:
                 "fallback": 0,
             }
             return report
+        batch_size = max(
+            1, min(8, int(refine_batch_size or _MAJOR_REFINE_BATCH_SIZE))
+        )
         batches = [
-            major[index : index + _MAJOR_REFINE_BATCH_SIZE]
-            for index in range(0, len(major), _MAJOR_REFINE_BATCH_SIZE)
+            major[index : index + batch_size]
+            for index in range(0, len(major), batch_size)
         ]
         outcomes = await asyncio.gather(
             *(
@@ -1250,6 +1280,7 @@ class AnalysisService:
         retry_count: int = 2,
         split_on_timeout: bool = True,
         refine_major_events: bool = True,
+        refine_batch_size: int = _MAJOR_REFINE_BATCH_SIZE,
     ) -> Dict[str, Any]:
         """全量建立轻量话题索引，再按需精炼主要事件。"""
 
@@ -1369,6 +1400,7 @@ class AnalysisService:
                 max_anchors=max_anchors,
                 include_links=include_links,
                 detail_level=detail_level,
+                refine_batch_size=refine_batch_size,
             )
         else:
             major, _ = partition_events(merged.get("events") or [])

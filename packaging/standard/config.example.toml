@@ -49,3 +49,5 @@ event_chunk_messages = 120
 event_chunk_characters = 8000
 event_retry_count = 2
 split_chunk_on_failure = true
+# 每次精炼调用包含的主要事件数量。replyer 是推理型模型且日报被截断时改为 1。
+refine_batch_size = 4

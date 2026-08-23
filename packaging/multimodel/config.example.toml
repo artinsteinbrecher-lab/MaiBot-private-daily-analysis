@@ -50,3 +50,6 @@ event_chunk_messages = 120
 event_chunk_characters = 8000
 event_retry_count = 2
 split_chunk_on_failure = true
+# 每次精炼调用包含的主要事件数量。plugin_daily_compose 使用推理型模型
+# （思考与最终 JSON 共用输出预算，如 DeepSeek V4 Flash）时建议改为 1-2。
+refine_batch_size = 4
