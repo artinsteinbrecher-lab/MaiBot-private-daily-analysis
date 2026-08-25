@@ -48,8 +48,9 @@ _EVENT_CANDIDATE_HARD_LIMIT = 1000
 _LLM_MAX_CONCURRENCY = 2
 _LLM_CONCURRENCY_MAX = 6
 
-# 单次 LLM 调用的最长等待（秒），到点放弃该次分析项。增强任务的宿主硬上限为
-# 240 秒，因此默认保留 60 秒余量给 RPC 收尾、重试和单群整体超时控制。
+# 单次 LLM 调用的最长等待（秒），到点放弃该次分析项。默认值偏保守；宿主各任务的
+# 硬超时因部署而异（实测 240-360 秒），插件等待低于宿主硬超时会放弃即将成功的慢
+# 响应，建议按宿主实际配置调高（见插件"高级"配置）。
 _DEFAULT_CALL_TIMEOUT_S = 180
 _RPC_TIMEOUT_GRACE_S = 5
 
@@ -930,7 +931,11 @@ class AnalysisService:
         for index, candidate in enumerate(batch, start=1):
             candidate_id = f"E{index}"
             raw = raw_by_id.get(candidate_id)
+            candidate_title = str(candidate.get("title") or "")
             if not raw:
+                self.logger.warning(
+                    f"精炼响应缺少候选 {candidate_id}（{candidate_title}）"
+                )
                 refined.append(candidate)
                 refined_flags.append(False)
                 continue
@@ -943,6 +948,10 @@ class AnalysisService:
                 include_links=include_links,
             )
             if not grounded.get("events"):
+                self.logger.warning(
+                    f"候选 {candidate_id}（{candidate_title}）的精炼结果"
+                    "未通过事实锚定校验"
+                )
                 refined.append(candidate)
                 refined_flags.append(False)
                 continue
@@ -978,6 +987,12 @@ class AnalysisService:
                 if single_success:
                     refined[index] = single_events[0]
                     success_count += 1
+                else:
+                    self.logger.warning(
+                        f"候选 E{index + 1}"
+                        f"（{str(batch[index].get('title') or '')}）"
+                        "单事件重试仍未精炼成功，保留简略候选"
+                    )
         return refined, success_count
 
     async def _refine_major_events(

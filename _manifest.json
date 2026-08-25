@@ -1,7 +1,7 @@
 {
   "manifest_version": 2,
   "id": "khiqwq.daily_analysis",
-  "version": "3.6.1",
+  "version": "3.6.2",
   "plugin_type": "tool",
   "name": "私聊群事件日报",
   "description": "按白名单读取 QQ 群聊天记录，生成带证据绑定、独立复核和回查锚点的事实型日报，并仅发送给指定管理员私聊。保留事实型个人画像，不包含娱乐评级。",

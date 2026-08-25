@@ -6,10 +6,10 @@
 
 这里提供的是 **麦麦安静写书 v3.1.1**。这是已经整理和检查过的禁言整合维护版。
 
-这是旧版维护包。想使用新版总结核心，请改看下面的 v3.6.1 standard 或 multimodel，三个版本不要同时安装。
+这是旧版维护包。想使用新版总结核心，请改看下面的 v3.6.2 standard 或 multimodel，三个版本不要同时安装。
 
-[下载“麦麦安静写书”](https://github.com/artinsteinbrecher-lab/MaiBot-private-daily-analysis/releases/download/v3.6.1/khiqwq_daily_analysis-v3.1.1-legacy-silence.zip) ·
-[打开三版本下载页](https://github.com/artinsteinbrecher-lab/MaiBot-private-daily-analysis/releases/tag/v3.6.1) ·
+[下载“麦麦安静写书”](https://github.com/artinsteinbrecher-lab/MaiBot-private-daily-analysis/releases/download/v3.6.2/khiqwq_daily_analysis-v3.1.1-legacy-silence.zip) ·
+[打开三版本下载页](https://github.com/artinsteinbrecher-lab/MaiBot-private-daily-analysis/releases/tag/v3.6.2) ·
 [查看三个版本](docs/DOWNLOADS.md)
 
 ## 它会帮你做什么
@@ -73,7 +73,7 @@
 
 如果只是想让麦麦安静地待在群里，不需要日报和个人总结，可以试试看从这个项目里分离出来的 **麦麦群安静插件**。它只负责安静，设置会更单纯。
 
-如果更在意总结效果，可以看看 **麦麦认真写书**；如果还想让多个模型分工整理和复查，可以看看 **麦麦一起写书**。它们都使用 v3.6.1 的新版总结核心，但不再自带群聊禁言。
+如果更在意总结效果，可以看看 **麦麦认真写书**；如果还想让多个模型分工整理和复查，可以看看 **麦麦一起写书**。它们都使用 v3.6.2 的新版总结核心，但不再自带群聊禁言。
 
 [查看三个版本的介绍、下载和安装](docs/DOWNLOADS.md)
 

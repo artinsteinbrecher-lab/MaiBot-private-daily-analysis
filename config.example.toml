@@ -1,6 +1,6 @@
 [plugin]
 enabled = false
-config_version = "3.6.1"
+config_version = "3.6.2"
 
 [summary]
 coverage_mode = "完整覆盖"

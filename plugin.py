@@ -49,7 +49,7 @@ class PluginSection(PluginConfigBase):
         json_schema_extra={"label": "启用插件"},
     )
     config_version: str = Field(
-        default="3.6.1",
+        default="3.6.2",
         description="配置文件版本，用于兼容性校验，请勿手动修改",
         json_schema_extra={"label": "配置版本", "disabled": True},
     )
@@ -213,8 +213,12 @@ class AdvancedSection(PluginConfigBase):
     llm_timeout_seconds: int = Field(
         default=180,
         description="单次 LLM 调用的最长等待时间（秒），到点放弃该次分析项。"
-        "插件会把该值传递给 MaiBot 的 cap.call RPC；增强任务建议保持低于宿主 240 秒硬上限。",
-        json_schema_extra={"label": "LLM 调用超时（秒）", "hint": "默认 180；增强任务宿主上限 240"},
+        "插件会把该值传递给 MaiBot 的 cap.call RPC。建议不低于宿主对应任务的硬超时，"
+        "否则会放弃宿主侧即将成功返回的慢响应",
+        json_schema_extra={
+            "label": "LLM 调用超时（秒）",
+            "hint": "默认 180；渠道响应慢时按宿主任务硬超时上浮，例如 420",
+        },
     )
     render_timeout_seconds: int = Field(
         default=25,
