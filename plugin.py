@@ -49,7 +49,7 @@ class PluginSection(PluginConfigBase):
         json_schema_extra={"label": "启用插件"},
     )
     config_version: str = Field(
-        default="3.6.1",
+        default="3.6.2",
         description="配置文件版本，用于兼容性校验，请勿手动修改",
         json_schema_extra={"label": "配置版本", "disabled": True},
     )
@@ -213,8 +213,12 @@ class AdvancedSection(PluginConfigBase):
     llm_timeout_seconds: int = Field(
         default=180,
         description="单次 LLM 调用的最长等待时间（秒），到点放弃该次分析项。"
-        "插件会把该值传递给 MaiBot 的 cap.call RPC；增强任务建议保持低于宿主 240 秒硬上限。",
-        json_schema_extra={"label": "LLM 调用超时（秒）", "hint": "默认 180；增强任务宿主上限 240"},
+        "插件会把该值传递给 MaiBot 的 cap.call RPC。建议不低于宿主对应任务的硬超时，"
+        "否则会放弃宿主侧即将成功返回的慢响应",
+        json_schema_extra={
+            "label": "LLM 调用超时（秒）",
+            "hint": "默认 180；渠道响应慢时按宿主任务硬超时上浮，例如 420",
+        },
     )
     render_timeout_seconds: int = Field(
         default=25,
@@ -265,6 +269,24 @@ class AdvancedSection(PluginConfigBase):
         default=True,
         description="分段重试仍失败时，将该时段一分为二后再次分析",
         json_schema_extra={"label": "失败后拆分重试"},
+    )
+    refine_batch_size: int = Field(
+        default=4,
+        description="每次精炼调用包含的主要事件数量（1-8）。推理型模型的思考和最终 JSON "
+        "共用输出预算，日报出现精炼回退或内容被截断时建议调小到 1-2",
+        json_schema_extra={
+            "label": "每批精炼事件数",
+            "hint": "推荐 4；模型输出经常被截断时改为 1",
+        },
+    )
+    llm_concurrency: int = Field(
+        default=2,
+        description="同时发起的 LLM 调用数量（1-6）。模型渠道单次响应普遍超过 1 分钟、"
+        "高流量群日报因单群超时只完成一部分时可调高到 3-4；渠道会限流时保持 2",
+        json_schema_extra={
+            "label": "LLM 并发调用数",
+            "hint": "推荐 2；渠道慢导致覆盖率低时改为 3-4",
+        },
     )
 
 
@@ -325,6 +347,7 @@ class DailyAnalysisPlugin(MaiBotPlugin):
             user_profile_model=routes["user_profile"],
             call_timeout_s=adv.llm_timeout_seconds,
             timezone_name=self.config.auto_summary.timezone,
+            llm_concurrency=int(getattr(adv, "llm_concurrency", 2) or 2),
         )
         self._renderer = SummaryRenderer(self.ctx, self._render_timeout_ms())
         self._start_scheduler()
@@ -422,6 +445,9 @@ class DailyAnalysisPlugin(MaiBotPlugin):
             self._service.verify_model = routes["verify"]
             self._service.user_profile_model = routes["user_profile"]
             self._service.call_timeout_s = max(5, int(self.config.advanced.llm_timeout_seconds or 180))
+            self._service.set_llm_concurrency(
+                int(getattr(self.config.advanced, "llm_concurrency", 2) or 2)
+            )
             self._service.timezone_name = (
                 self.config.auto_summary.timezone or "Asia/Shanghai"
             )
@@ -927,6 +953,10 @@ class DailyAnalysisPlugin(MaiBotPlugin):
             split_on_timeout=bool(advanced_cfg.split_chunk_on_failure),
             refine_major_events=bool(
                 getattr(summary_cfg, "refine_major_events", True)
+            ),
+            refine_batch_size=max(
+                1,
+                min(8, int(getattr(advanced_cfg, "refine_batch_size", 4) or 4)),
             ),
         )
         result["report"] = report

@@ -66,6 +66,19 @@ class EventGroundingTests(unittest.TestCase):
         message_id = self.service._event_message_id(self.messages[0])
         self.assertIn(f"[09:30:20] [id={message_id}] 小明:", formatted)
 
+    def test_llm_concurrency_is_configurable_and_clamped(self):
+        service = AnalysisService(_Context(), llm_concurrency=4)
+        self.assertEqual(service.llm_concurrency, 4)
+        self.assertEqual(service._llm_semaphore._value, 4)
+
+        service.set_llm_concurrency(99)
+        self.assertEqual(service.llm_concurrency, 6)
+        service.set_llm_concurrency(0)
+        self.assertEqual(service.llm_concurrency, 2)  # 0/空值回落默认 2
+        service.set_llm_concurrency(-3)
+        self.assertEqual(service.llm_concurrency, 1)
+        self.assertEqual(self.service.llm_concurrency, 2)
+
     def test_llm_timeout_is_forwarded_to_capability_rpc(self):
         calls = []
 
@@ -318,6 +331,93 @@ class EventGroundingTests(unittest.TestCase):
         self.assertEqual(report["refinement"]["requested"], 1)
         self.assertEqual(report["refinement"]["refined"], 0)
         self.assertEqual(report["refinement"]["fallback"], 1)
+
+    def _refine_candidates_pair(self):
+        messages = self._bulk_messages(20)
+        base = self._fake_chunk_report(messages, importance="major")["events"][0]
+        candidate_a = {**base, "event_id": "cand-1"}
+        candidate_b = {**base, "title": "另一个事件", "event_id": "cand-2"}
+        return messages, candidate_a, candidate_b
+
+    @staticmethod
+    def _single_candidate_response():
+        return json.dumps(
+            {
+                "events": [
+                    {
+                        "candidate_id": "E1",
+                        "importance": "major",
+                        "status": "discussed",
+                        "start_time": "08:00",
+                        "end_time": "08:00",
+                        "title": "详细事件",
+                        "summary": "详细经过",
+                        "facts": [{"claim": "有效消息 0", "evidence_ids": []}],
+                        "outcomes": [],
+                        "pending": [],
+                        "participants": ["群友"],
+                        "anchors": [],
+                        "links": [],
+                    }
+                ]
+            },
+            ensure_ascii=False,
+        )
+
+    def test_truncated_refine_batch_retries_each_candidate_individually(self):
+        messages, candidate_a, candidate_b = self._refine_candidates_pair()
+        prompts = []
+
+        async def truncation_llm(prompt, **kwargs):
+            prompts.append(prompt)
+            # 多事件批量输出被 MAX_TOKENS 截断 → 整批解析失败；
+            # 单事件提示词（不含 ### E2）可以完整返回。
+            if "### E2" in prompt:
+                return None
+            return self._single_candidate_response()
+
+        self.service._llm = truncation_llm
+        report = asyncio.run(
+            self.service._refine_major_events(
+                {"overview": "", "events": [candidate_a, candidate_b]},
+                messages,
+                max_anchors=2,
+                include_links=True,
+                detail_level="full",
+            )
+        )
+        self.assertEqual(len(prompts), 3)  # 1 次批量 + 2 次单事件重试
+        self.assertEqual(report["refinement"]["requested"], 2)
+        self.assertEqual(report["refinement"]["refined"], 2)
+        self.assertEqual(report["refinement"]["fallback"], 0)
+        self.assertEqual(
+            sorted(event["event_id"] for event in report["events"]),
+            ["cand-1", "cand-2"],
+        )
+        self.assertTrue(all(event.get("refined") for event in report["events"]))
+
+    def test_refine_batch_size_one_sends_single_candidate_prompts(self):
+        messages, candidate_a, candidate_b = self._refine_candidates_pair()
+        prompts = []
+
+        async def single_llm(prompt, **kwargs):
+            prompts.append(prompt)
+            self.assertNotIn("### E2", prompt)
+            return self._single_candidate_response()
+
+        self.service._llm = single_llm
+        report = asyncio.run(
+            self.service._refine_major_events(
+                {"overview": "", "events": [candidate_a, candidate_b]},
+                messages,
+                max_anchors=2,
+                include_links=True,
+                detail_level="full",
+                refine_batch_size=1,
+            )
+        )
+        self.assertEqual(len(prompts), 2)
+        self.assertEqual(report["refinement"]["refined"], 2)
 
     def test_refinement_grounds_detailed_major_event(self):
         messages = self._bulk_messages(20)

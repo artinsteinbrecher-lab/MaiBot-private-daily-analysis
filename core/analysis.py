@@ -42,11 +42,15 @@ _TOPIC_MAX_CANDIDATES_PER_CHUNK = 12
 _MAJOR_REFINE_BATCH_SIZE = 4
 _EVENT_CANDIDATE_HARD_LIMIT = 1000
 
-# 并发 LLM 调用上限。设为 2：兼顾速度与"上游串行时排队不耗尽超时预算"。
+# 默认并发 LLM 调用上限。设为 2：兼顾速度与"上游串行时排队不耗尽超时预算"。
+# 上游是高延迟聚合渠道（单次请求普遍超过 1 分钟）时，2 路并发跑不完高流量群的
+# 全部分片；可通过插件配置调高，上限见 _LLM_CONCURRENCY_MAX。
 _LLM_MAX_CONCURRENCY = 2
+_LLM_CONCURRENCY_MAX = 6
 
-# 单次 LLM 调用的最长等待（秒），到点放弃该次分析项。增强任务的宿主硬上限为
-# 240 秒，因此默认保留 60 秒余量给 RPC 收尾、重试和单群整体超时控制。
+# 单次 LLM 调用的最长等待（秒），到点放弃该次分析项。默认值偏保守；宿主各任务的
+# 硬超时因部署而异（实测 240-360 秒），插件等待低于宿主硬超时会放弃即将成功的慢
+# 响应，建议按宿主实际配置调高（见插件"高级"配置）。
 _DEFAULT_CALL_TIMEOUT_S = 180
 _RPC_TIMEOUT_GRACE_S = 5
 
@@ -86,6 +90,7 @@ class AnalysisService:
         timezone_name: str = "Asia/Shanghai",
         verify_model: str = "",
         user_profile_model: str = "",
+        llm_concurrency: int = _LLM_MAX_CONCURRENCY,
     ):
         self.ctx = ctx
         self.logger = ctx.logger
@@ -101,7 +106,20 @@ class AnalysisService:
         # 限制并发 LLM 调用数：若上游串行处理，一次放出过多调用会让排队靠后的调用
         # 把等待时间算进自己的超时预算。信号量在真正发起 ctx.llm.generate 前获取，
         # 让每个调用的 RPC 预算从有空闲槽位时才开始。
-        self._llm_semaphore = asyncio.Semaphore(_LLM_MAX_CONCURRENCY)
+        self.llm_concurrency = self._clamp_concurrency(llm_concurrency)
+        self._llm_semaphore = asyncio.Semaphore(self.llm_concurrency)
+
+    @staticmethod
+    def _clamp_concurrency(value: int) -> int:
+        return max(1, min(_LLM_CONCURRENCY_MAX, int(value or _LLM_MAX_CONCURRENCY)))
+
+    def set_llm_concurrency(self, value: int) -> None:
+        """热更新并发上限。在途调用继续持有旧信号量直到结束，属良性不一致。"""
+        clamped = self._clamp_concurrency(value)
+        if clamped == self.llm_concurrency:
+            return
+        self.llm_concurrency = clamped
+        self._llm_semaphore = asyncio.Semaphore(clamped)
 
     # ==================== LLM 调用封装 ====================
 
@@ -828,8 +846,14 @@ class AnalysisService:
         max_anchors: int,
         include_links: bool,
         detail_level: str,
+        allow_single_retry: bool = True,
     ) -> Tuple[List[Dict[str, Any]], int]:
-        """批量精炼主要事件；失败事件原样返回，不影响话题索引完整性。"""
+        """批量精炼主要事件；失败事件原样返回，不影响话题索引完整性。
+
+        多事件批量输出对推理型模型（输出预算与思考 token 共享）容易触发
+        MAX_TOKENS 截断：JSON 写到中途被切断，整批解析失败或后半批候选缺失。
+        因此批量结果不完整时，未精炼的候选会以单事件方式各重试一次——单事件
+        输出最短，是同一预算下最可能完整返回的形态。"""
 
         source_by_id: Dict[str, List[dict]] = {}
         candidate_blocks: List[str] = []
@@ -853,7 +877,7 @@ class AnalysisService:
                 f"初步概括：{event.get('summary')}\n"
                 f"对应原消息：\n{source_text}"
             )
-        prompt = f"""你是一名严谨的群聊事件编辑。下面是最多 {_MAJOR_REFINE_BATCH_SIZE} 个
+        prompt = f"""你是一名严谨的群聊事件编辑。下面是 {len(batch)} 个
 主要事件候选及其对应原消息。请逐个补充详细经过、明确结论、待确认事项、必要参与者、
 重要链接和回查原话。{self._event_detail_instruction(detail_level)}
 
@@ -902,12 +926,18 @@ class AnalysisService:
         }
 
         refined: List[Dict[str, Any]] = []
+        refined_flags: List[bool] = []
         success_count = 0
         for index, candidate in enumerate(batch, start=1):
             candidate_id = f"E{index}"
             raw = raw_by_id.get(candidate_id)
+            candidate_title = str(candidate.get("title") or "")
             if not raw:
+                self.logger.warning(
+                    f"精炼响应缺少候选 {candidate_id}（{candidate_title}）"
+                )
                 refined.append(candidate)
+                refined_flags.append(False)
                 continue
             grounded = self._ground_event_report(
                 {"overview": "", "events": [{**raw, "importance": "major"}]},
@@ -918,7 +948,12 @@ class AnalysisService:
                 include_links=include_links,
             )
             if not grounded.get("events"):
+                self.logger.warning(
+                    f"候选 {candidate_id}（{candidate_title}）的精炼结果"
+                    "未通过事实锚定校验"
+                )
                 refined.append(candidate)
+                refined_flags.append(False)
                 continue
             event = grounded["events"][0]
             # The candidate ID is authoritative; a refinement model must not
@@ -934,7 +969,30 @@ class AnalysisService:
             )
             event["refined"] = True
             refined.append(event)
+            refined_flags.append(True)
             success_count += 1
+
+        if allow_single_retry and len(batch) > 1 and success_count < len(batch):
+            for index, succeeded in enumerate(refined_flags):
+                if succeeded:
+                    continue
+                single_events, single_success = await self._refine_major_batch(
+                    [batch[index]],
+                    messages,
+                    max_anchors=max_anchors,
+                    include_links=include_links,
+                    detail_level=detail_level,
+                    allow_single_retry=False,
+                )
+                if single_success:
+                    refined[index] = single_events[0]
+                    success_count += 1
+                else:
+                    self.logger.warning(
+                        f"候选 E{index + 1}"
+                        f"（{str(batch[index].get('title') or '')}）"
+                        "单事件重试仍未精炼成功，保留简略候选"
+                    )
         return refined, success_count
 
     async def _refine_major_events(
@@ -945,6 +1003,7 @@ class AnalysisService:
         max_anchors: int,
         include_links: bool,
         detail_level: str,
+        refine_batch_size: int = _MAJOR_REFINE_BATCH_SIZE,
     ) -> Dict[str, Any]:
         major, minor = partition_events(report.get("events") or [])
         if not major:
@@ -954,9 +1013,12 @@ class AnalysisService:
                 "fallback": 0,
             }
             return report
+        batch_size = max(
+            1, min(8, int(refine_batch_size or _MAJOR_REFINE_BATCH_SIZE))
+        )
         batches = [
-            major[index : index + _MAJOR_REFINE_BATCH_SIZE]
-            for index in range(0, len(major), _MAJOR_REFINE_BATCH_SIZE)
+            major[index : index + batch_size]
+            for index in range(0, len(major), batch_size)
         ]
         outcomes = await asyncio.gather(
             *(
@@ -1250,6 +1312,7 @@ class AnalysisService:
         retry_count: int = 2,
         split_on_timeout: bool = True,
         refine_major_events: bool = True,
+        refine_batch_size: int = _MAJOR_REFINE_BATCH_SIZE,
     ) -> Dict[str, Any]:
         """全量建立轻量话题索引，再按需精炼主要事件。"""
 
@@ -1369,6 +1432,7 @@ class AnalysisService:
                 max_anchors=max_anchors,
                 include_links=include_links,
                 detail_level=detail_level,
+                refine_batch_size=refine_batch_size,
             )
         else:
             major, _ = partition_events(merged.get("events") or [])

@@ -1,9 +1,9 @@
-# 麦麦认真写书 · v3.6.1 标准版
+# 麦麦认真写书 · v3.6.2 标准版
 
 维护仓库：[artinsteinbrecher-lab/MaiBot-private-daily-analysis](https://github.com/artinsteinbrecher-lab/MaiBot-private-daily-analysis)
 
-当前安装包：`khiqwq_daily_analysis-v3.6.1-standard.zip` ·
-[预留 Release 地址](https://github.com/artinsteinbrecher-lab/MaiBot-private-daily-analysis/releases/tag/v3.6.1) ·
+当前安装包：`khiqwq_daily_analysis-v3.6.2-standard.zip` ·
+[预留 Release 地址](https://github.com/artinsteinbrecher-lab/MaiBot-private-daily-analysis/releases/tag/v3.6.2) ·
 [返回版本与下载](../../docs/DOWNLOADS.md)
 
 这个版本专心把群聊里的事情写清楚。它会同时保留主要事件和普通事件，把日报只发给管理员私聊，并尽量核对时间、参与者、链接和引用。
@@ -80,7 +80,7 @@ fonts/
 ```toml
 [plugin]
 enabled = true
-config_version = "3.6.1"
+config_version = "3.6.2"
 
 [summary]
 coverage_mode = "完整覆盖"
@@ -132,7 +132,7 @@ split_chunk_on_failure = true
 - 多个管理员共用来源群白名单，但每次手动请求的进度与结果只发给发起账号。
 - 插件设置中不再出现模型任务、供应商或模型 ID 字段。
 - 四个内部流程固定跟随 `replyer`，下载插件本身即可运行。
-- 如需四任务独立模型分配，请改用“麦麦一起写书”（v3.6.1 多模型版）。
+- 如需四任务独立模型分配，请改用“麦麦一起写书”（v3.6.2 多模型版）。
 - 没加入的群没有可用群聊流，会被标为空或不可用，不会阻塞其他群。
 
 ### 模型来源
