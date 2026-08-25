@@ -66,6 +66,19 @@ class EventGroundingTests(unittest.TestCase):
         message_id = self.service._event_message_id(self.messages[0])
         self.assertIn(f"[09:30:20] [id={message_id}] 小明:", formatted)
 
+    def test_llm_concurrency_is_configurable_and_clamped(self):
+        service = AnalysisService(_Context(), llm_concurrency=4)
+        self.assertEqual(service.llm_concurrency, 4)
+        self.assertEqual(service._llm_semaphore._value, 4)
+
+        service.set_llm_concurrency(99)
+        self.assertEqual(service.llm_concurrency, 6)
+        service.set_llm_concurrency(0)
+        self.assertEqual(service.llm_concurrency, 2)  # 0/空值回落默认 2
+        service.set_llm_concurrency(-3)
+        self.assertEqual(service.llm_concurrency, 1)
+        self.assertEqual(self.service.llm_concurrency, 2)
+
     def test_llm_timeout_is_forwarded_to_capability_rpc(self):
         calls = []
 

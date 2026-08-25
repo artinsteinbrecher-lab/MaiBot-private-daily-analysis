@@ -53,3 +53,6 @@ split_chunk_on_failure = true
 # 每次精炼调用包含的主要事件数量。plugin_daily_compose 使用推理型模型
 # （思考与最终 JSON 共用输出预算，如 DeepSeek V4 Flash）时建议改为 1-2。
 refine_batch_size = 4
+# 同时发起的 LLM 调用数量。聚合渠道单次响应普遍超过 1 分钟、高流量群
+# 因单群超时只完成部分覆盖时改为 3-4；渠道会限流时保持 2。
+llm_concurrency = 2

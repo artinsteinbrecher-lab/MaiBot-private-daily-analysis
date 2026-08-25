@@ -42,8 +42,11 @@ _TOPIC_MAX_CANDIDATES_PER_CHUNK = 12
 _MAJOR_REFINE_BATCH_SIZE = 4
 _EVENT_CANDIDATE_HARD_LIMIT = 1000
 
-# 并发 LLM 调用上限。设为 2：兼顾速度与"上游串行时排队不耗尽超时预算"。
+# 默认并发 LLM 调用上限。设为 2：兼顾速度与"上游串行时排队不耗尽超时预算"。
+# 上游是高延迟聚合渠道（单次请求普遍超过 1 分钟）时，2 路并发跑不完高流量群的
+# 全部分片；可通过插件配置调高，上限见 _LLM_CONCURRENCY_MAX。
 _LLM_MAX_CONCURRENCY = 2
+_LLM_CONCURRENCY_MAX = 6
 
 # 单次 LLM 调用的最长等待（秒），到点放弃该次分析项。增强任务的宿主硬上限为
 # 240 秒，因此默认保留 60 秒余量给 RPC 收尾、重试和单群整体超时控制。
@@ -86,6 +89,7 @@ class AnalysisService:
         timezone_name: str = "Asia/Shanghai",
         verify_model: str = "",
         user_profile_model: str = "",
+        llm_concurrency: int = _LLM_MAX_CONCURRENCY,
     ):
         self.ctx = ctx
         self.logger = ctx.logger
@@ -101,7 +105,20 @@ class AnalysisService:
         # 限制并发 LLM 调用数：若上游串行处理，一次放出过多调用会让排队靠后的调用
         # 把等待时间算进自己的超时预算。信号量在真正发起 ctx.llm.generate 前获取，
         # 让每个调用的 RPC 预算从有空闲槽位时才开始。
-        self._llm_semaphore = asyncio.Semaphore(_LLM_MAX_CONCURRENCY)
+        self.llm_concurrency = self._clamp_concurrency(llm_concurrency)
+        self._llm_semaphore = asyncio.Semaphore(self.llm_concurrency)
+
+    @staticmethod
+    def _clamp_concurrency(value: int) -> int:
+        return max(1, min(_LLM_CONCURRENCY_MAX, int(value or _LLM_MAX_CONCURRENCY)))
+
+    def set_llm_concurrency(self, value: int) -> None:
+        """热更新并发上限。在途调用继续持有旧信号量直到结束，属良性不一致。"""
+        clamped = self._clamp_concurrency(value)
+        if clamped == self.llm_concurrency:
+            return
+        self.llm_concurrency = clamped
+        self._llm_semaphore = asyncio.Semaphore(clamped)
 
     # ==================== LLM 调用封装 ====================
 

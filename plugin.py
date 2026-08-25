@@ -275,6 +275,15 @@ class AdvancedSection(PluginConfigBase):
             "hint": "推荐 4；模型输出经常被截断时改为 1",
         },
     )
+    llm_concurrency: int = Field(
+        default=2,
+        description="同时发起的 LLM 调用数量（1-6）。模型渠道单次响应普遍超过 1 分钟、"
+        "高流量群日报因单群超时只完成一部分时可调高到 3-4；渠道会限流时保持 2",
+        json_schema_extra={
+            "label": "LLM 并发调用数",
+            "hint": "推荐 2；渠道慢导致覆盖率低时改为 3-4",
+        },
+    )
 
 
 class DailyAnalysisConfig(PluginConfigBase):
@@ -334,6 +343,7 @@ class DailyAnalysisPlugin(MaiBotPlugin):
             user_profile_model=routes["user_profile"],
             call_timeout_s=adv.llm_timeout_seconds,
             timezone_name=self.config.auto_summary.timezone,
+            llm_concurrency=int(getattr(adv, "llm_concurrency", 2) or 2),
         )
         self._renderer = SummaryRenderer(self.ctx, self._render_timeout_ms())
         self._start_scheduler()
@@ -431,6 +441,9 @@ class DailyAnalysisPlugin(MaiBotPlugin):
             self._service.verify_model = routes["verify"]
             self._service.user_profile_model = routes["user_profile"]
             self._service.call_timeout_s = max(5, int(self.config.advanced.llm_timeout_seconds or 180))
+            self._service.set_llm_concurrency(
+                int(getattr(self.config.advanced, "llm_concurrency", 2) or 2)
+            )
             self._service.timezone_name = (
                 self.config.auto_summary.timezone or "Asia/Shanghai"
             )

@@ -51,3 +51,5 @@ event_retry_count = 2
 split_chunk_on_failure = true
 # 每次精炼调用包含的主要事件数量。replyer 是推理型模型且日报被截断时改为 1。
 refine_batch_size = 4
+# 同时发起的 LLM 调用数量。渠道响应慢导致高流量群覆盖率低时改为 3-4。
+llm_concurrency = 2
